@@ -1,0 +1,45 @@
+{
+	"name": "audiocpp-ui",
+	"build": {
+		"dockerfile": "Dockerfile"
+	},
+	"features": {
+		"ghcr.io/devcontainers/features/node:1": {},
+		"ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
+	},
+	"workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+	"workspaceFolder": "/workspace",
+	"remoteUser": "vscode",
+	"containerEnv": {
+		"RUST_TEST_THREADS": "8",
+		"CARGO_BUILD_JOBS": "8",
+		"DISPLAY": "${localEnv:DISPLAY}",
+		"CLAUDE_CONFIG_DIR": "/home/vscode/.claude-config"
+	},
+	"runArgs": [
+		"--name=devcontainer-audiocpp-ui",
+		"--network=host",
+		"--memory=32g",
+		"--cpus=8",
+		"--cap-drop=ALL",
+		"--device=/dev/dri",
+		"--device=/dev/kfd",
+		"--group-add=keep-groups"
+	],
+	"mounts": [
+		"source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind",
+		"source=${localWorkspaceFolder}/.devcontainer/devcontainer.json,target=/workspace/.devcontainer/devcontainer.json,type=bind,readonly",
+		"source=${localWorkspaceFolder}/.devcontainer/Dockerfile,target=/workspace/.devcontainer/Dockerfile,type=bind,readonly",
+		"source=/mnt/storage/audiocpp,target=/mnt/storage/audiocpp,type=bind",
+		"source=audiocpp-ui-claude-config,target=/home/vscode/.claude-config,type=volume",
+		"source=cargo-registry-cache,target=/usr/local/cargo/registry,type=volume"
+	],
+	"customizations": {
+		"vscode": {
+			"settings": {
+				"claudeCode.allowDangerouslySkipPermissions": true,
+				"claudeCode.initialPermissionMode": "bypassPermissions"
+			}
+		}
+	}
+}

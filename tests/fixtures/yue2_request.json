@@ -1,0 +1,28 @@
+{
+  "model": "yue2",
+  "request": {
+    "options": {
+      "style": "English, indie pop, bright acoustic guitar, soft drums, warm lead vocal, polished demo mix",
+      "abc": "X:1\nT:\nM:4/4\nL:1/32\nQ:1/4=94\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:Fm\n% intro\nV: Vocal\nz24z4\"C#maj7\"z4|\"C#maj7\"z32|\"Fm7\"z32|\"C#maj7\"z32|\nV: Ins\nZ|a4a2g4g4g4g4g4g4g2|a4a2g4g4f4f2e4z2f4f2|a4a2g4g4g4g4g4g4g2|\nV: Vocal\n\"Fm7\"z32|\"C#maj7\"z32|\"Fm7\"z32|\"C#maj7\"z32|\nV: Ins\na4a2g4g4f4f2e4z2f4f2|a4a2g4g4g4g4g4g4g2|a4a2g4g4f4f2e4z2f4f2|a4a2g4g4g4g4g4g4g2|\nV: Vocal\n\"Fm7\"z32|\"C#maj7\"z32|\"Fm7\"z32|\"C#maj7\"z32|\nV: Ins\na4a2g4g4f4f2e4z2f4f2|a4a2g4g4g4g4g4g4g2|a4a2g4g4f4f2e4z2c4f2|a4a2g4g4g4g4g4g4g2|\nV: Vocal\n\"Fm7\"z32|\"C#maj7\"z32|\"Fm7\"z32|\"C#maj7\"z32|\nV: Ins\na4a2g4g4f4f2e4z2c4f2|a4a2g4g4g4g4g4g4g2|a4a2g4g4f4f2e4z2c4f2|a4a2g4g4g4g4g4g4g2|\nV: Vocal\n\"Fm7\"z32|\nV: Ins\na4a2g4g4f4f2e4z2f2e4|\n% chorus\nV: Vocal\n\"C#maj7\"z32|\"Fm7\"z32|\"C#maj7\"z32|\"Fm7\"z32|\nV: Ins\nd4d4z12d4z2c6|f4z2f6z2e6e4z2c6|d4d4z12c4z2c6|f4z2f6z2e6e4z2c6|\nV: Vocal\n\"C#maj7\"z32|\"Fm7\"z32|\"C#maj7\"z32|\"Fm7\"z32|\nV: Ins\nd4d4z12d4z2c6|f4z2f6z2e6e4z2c6|d4d4z12c4z2c6|f4z2f6z2e6B4z2A6|\nV: Vocal\n\"C#maj7\"z32|\"Fm7\"z32|\"C#maj7\"z32|\"Fm7\"z32|\nV: Ins\nF4D4E4D4D4D4z2G2C4|C4C2E2C4C2E2C4C2D2C2B2A2F2|A4D4E4D4D4D4z2G2C4|C4C2E2C4C2E2C4C2D2C2B2A2F2|\nV: Vocal\n\"C#maj7\"z32|\"Fm7\"z32|\"C#maj7\"z32|\"Fm7\"z32|\nV: Ins\nA4D4E4D4D4D4z2G2C4|C4C2E2C4C2E2C4C2D2C2B2A2F2|A4D4E4D4D4D4z2G2C4|C4C2E2C4C2E2C4C2D2C2B2A2F2|\nV: Vocal\n\"C#maj7\"z32|\"Fm7\"z32|\"C#maj7\"z32|\"Fm7\"z32|\nV: Ins\nA4A2G4G4G4G4G4G4G2|A4A2G4G4F4F2E4z2F4F2|A4A2G4G4G4G4G4G4G2|A4A2G4G4F4F2E4z2F2E2F2|\nV: Vocal\n\"C#maj7\"z32|\"Fm7\"z32|\"C#maj7\"z32|\"Fm7\"z32|\nV: Ins\nA4A2G4G4G4G4G4G4G2|A4A2G4G4F4F2E4z2F2E2F2|A4A2G4G4G4G4G4G4G2|A4A2G4G4F4F2E2F2E2F2E2F2|\nV: Vocal\n\"C#maj7\"z32|\"D#6\"z32|\"C#maj7\"z32|\"D#6\"z32|\nV: Ins\nD4D4D4E6A6G4F4|Z|D4D4D4E6A6G4z4|Z|\nV: Vocal\n\"C#maj7\"z32|\"D#6\"z32|\"C#maj7\"z32|\"D#6\"z32|\nV: Ins\nD4D4D4E6A6G4z4|Z|D4D4D4E6A6G4z4|Z|\n% interlude\nV: Vocal\n\"D#maj7\"z32|\"D#maj7\"z16\"F\"z16|\"D#maj7\"z32|\"D#maj7\"z32|\nV: Ins\nB4=A2B4f6B4A2B4B6|B4B2B4f6B4=A2B4B6|B4=A2B4f6B4A2B4B6|B4B2B4f6B4=A2B4B6|\nV: Vocal\n\"D#maj7\"z32|\"D#maj7\"z16\"F\"z16|\"D#maj7\"z32|\"D#maj7\"z16\"F\"z16|\nV: Ins\nB4=A2B4f6B4A2B4B6|B4B2B4f6B4=A2B2A2B6|B4=A2B4f6B4A2B4B6|B4B2B4f6B4=A2B2A2B2A4|\n% chorus\nV: Vocal\n\"D#\"z32|\"D#\"z16\"F\"z16|\"D#\"z32|\"D#\"z16\"F\"z16|\nV: Ins\nB4B4e4B4B4B4e4z2e2-|e2z4B2e4z2B4z2=A2B2A2f2F4|B4B4e4B4B4B4e4z2e2-|e2z4B2e4z2B4z2=A2B2f4z4|\nV: Vocal\n\"D#\"z32|\"D#\"z16\"F\"z16|\"D#\"z32|\"D#\"z16\"F\"z16|\nV: Ins\nB4B4e4B4B4B4e4z2e2-|e2z4B2e4z2B4z2=A2B2f4F4|B4B4e4B4B4B4e4z2e2-|e2z4B2e4z2B4z2=A2B2f4z4|\n% bridge\nV: Vocal\n\"D#\"z32|\"D#\"z32|\"D#\"z32|\"D#\"z32|\nV: Ins\ne4d4B4B4B4B4B4B4|B4B4B4B4B4B4B4B4|e4d4B4B4B4B4B4B4|B4B4B4B4B4B4B4B4|\nV: Vocal\n\"D#\"z32|\"D#\"z32|\"D#\"z32|\"D#\"z32|\nV: Ins\nB4B4B4B4B4B4B4B4|B4B4B4B4B4B4B4B4|e4d4B4B4B4B4B4B4|B4B4B4B4B4B4B4d4|\n% chorus\nV: Vocal\n\"D#\"z32|\"D#\"z32|\"D#\"z32|\"D#\"z32|\nV: Ins\ne4d4B4B4B4B4B4B4|B4B4B4B4=A4B4B4B4|e4d4B4B4B4B4B4B4|B4B4B4B4B4B4B4B4|\nV: Vocal\n\"D#\"z32|\"D#\"z32|\"D#\"z32|\"D#\"z32|\nV: Ins\ne4d4B4B4B4B4B4B4|B4B4B4B4B4B4B4B4|B4B4B4B4B4B4e4d4|B4B4B4B4B4B4B4B4|\nV: Vocal\n\"D#\"z16z16|\"D#\"z32|\"F\"z32|\"Gm\"z32|\nV: Ins\nB4B4B4B4B4B4B4B4|e4d4B4B4B4B4B4B4|B4B4B4B4B4B4B4B4|e4d4B4B4B4B4B4B4|\nV: Vocal\n\"F\"z32|\"D#\"z32|\"F\"z32|\"F\"z32|\nV: Ins\nB4B4B4B4B4B4B4B4|e4d4B4B4B4B4B4B4|B4B4B4B4B4B4B4B4|B4B4B4B4B4B4B4B4|\nV: Vocal\n\"D#\"z32|\"F\"z32|\"Gm\"z32|\"F\"z32|\nV: Ins\ne4d4B4B4B4B4B4B4|B4B4B4B4B4B4B4B4|e4d4B4B4B4B4B4B4|B4B4B4B4B4B4B4B4|\nV: Vocal\n\"D#\"z32|\"F\"z32|\"Gm\"z32|\"F\"z32|\nV: Ins\ne4d4B4B4B4B4B4B4|B4B4B4B4B4B4B4B4|e4d4B4B4B4B4B4B4|B4B4B4B4B4B4B4B4|\n% outro\nV: Vocal\n\"D#\"z32|\"F\"z32|\"Gm\"z32|\"F\"z32|\nV: Ins\ne4f4f4f4f4f4f4f4|f4f4f4f4f4f4f4f4|f4f4f4f4f4f4f4f4|f4f4f4f4f4f4f4f4|\nV: Vocal\n\"D#\"z32|\"F\"z32|\"Gm\"z32|\"F/A\"z32|\nV: Ins\nf4f4f4f4f4f4f4f4|f4f4f4f4f4f4f4f4|f4f4f4f4f4f4f4f4|f4f4f4f4z16|\nV: Vocal\n\"F/A\"z32|\nV: Ins\nZ|\n",
+      "cot": "full",
+      "guidance_scale": 1.01,
+      "num_inference_steps": 8,
+      "abc_temperature": 0.7,
+      "abc_top_p": 0.9,
+      "abc_top_k": 30,
+      "abc_repetition_penalty": 1.005,
+      "abc_penalty_window": 100,
+      "abc_min_tokens": 32,
+      "abc_max_tokens": 4096,
+      "semantic_temperature": 1,
+      "semantic_top_p": 0.95,
+      "semantic_top_k": 100,
+      "semantic_repetition_penalty": 1.2,
+      "semantic_penalty_window": 50,
+      "semantic_min_tokens": 200,
+      "semantic_max_tokens": 9000
+    },
+    "lyrics": "[Pre-Chorus]\n1 2 5 4 7 8 5 4 9 10 5 4 11 12 5 4, 3, 2\n1 2 5 4 7 8 5 4 9 10 5 4 11 12 5 4, 3, 2\n1 2 5 4 7 8 5 4 9 10 5 4 11 12 5 4, 3, 2\n1 2 5 4 7 8 5 4 9 10 5 4 11 12 5 4, 3, 2\n\n[Chorus]\n1 2 5 4 7 8 5 4 9 10 5 4 11 12 5 4\n1 2 5 4 7 8 5 4 9 10 5 4 11 12 5 4\n1 2 5 4 7 8 5 4 9 10 5 4 11 12 5 4\n1 2 5 4 7 8 5 4 9 10 5 4 11 12 5 4\n\n[Outro]\n1 2 5 4 7 8 5 4 9 10 5 4 11 12 5 4\n1 2 5 4 7 8 5 4 9 10 5 4 11 12 5 4\n1 2 5 4 7 8 5 4 9 10 5 4 11 12 5 4\n1 2 5 4 7 8 5 4 9 10 5 4 11 12 5 4\n1 2 5 4 7 8 5 4 9 10 5 4 11 12 5 4\n1 2 5 4 7 8 5 4 9 10 5 4 11 12 5 4\n1 2 5 4 7 8 5 4 9 10 5 4 11 12 5 4\n1 2 5 4 7 8 5 4 9 10 5 4 11 12 5 4",
+    "seed": 1233
+  }
+}

@@ -1,0 +1,57 @@
+// audiocpp-ui configuration (docs/DESIGN.md §3). Struct names are required.
+// Copy to ~/.config/audiocpp-ui/config.ron (Linux), or pass --config <path>.
+Config(
+    server_binary: "/mnt/storage/audiocpp/audiocpp_server",
+    working_dir: "/mnt/storage/audiocpp",
+    terminal: Native,          // .desktop on Linux, .command on macOS, .cmd on Windows
+                               // or: Command(["kitty", "--title", "{name}", "--", "{script}"]), Headless
+    request_timeout_secs: 1800,
+
+    servers: [
+        Server(
+            name: "gpu1",
+            port: 9123,
+            launch: Launch(
+                backend: "vulkan",
+                device: 1,
+                // --busy-timeout-ms 0: the server otherwise fails requests with 503 once a
+                // model has been busy for 5 minutes, which long songs can exceed.
+                extra_args: ["--ui", "--ui-management", "--log", "--busy-timeout-ms", "0"],
+                autostart: true,
+            ),
+        ),
+        Server(
+            name: "gpu2",
+            port: 9124,
+            launch: Launch(backend: "vulkan", device: 2,
+                           extra_args: ["--ui", "--ui-management", "--log", "--busy-timeout-ms", "0"], autostart: true),
+        ),
+        // attach-only: a server you start yourself
+        // Server(name: "manual", port: 8080),
+    ],
+
+    models: Models(
+        yue2: ModelSpec(
+            id: "yue2", family: "yue2", task: "gen", mode: "offline",
+            path: "/mnt/storage/audiocpp/models/Yue2-3B-GGUF",
+            session_options: {
+                "yue2.ar_lora_scale": "1",
+                "yue2.nar_lora_scale": "1",
+                "yue2.model_gguf": "yue2-3b-bf16.gguf",
+                "yue2.vae_gguf": "yue2-vae-f32.gguf",
+            },
+        ),
+        sheetsage2: ModelSpec(
+            id: "sheetsage2", family: "sheetsage2", task: "midi", mode: "offline",
+            path: "/mnt/storage/audiocpp/models/SheetSage2-GGUF/sheetsage2-orig.gguf",
+            session_options: {},
+        ),
+    ),
+
+    library: Library(
+        root: "~/Music/audiocpp",               // unreviewed/, reviewed/{good,neutral,bad}/, inputs/
+        encoder: Aac(bitrate_kbps: 256),        // or: Alac
+    ),
+
+    defaults: "presets/default.ron",            // relative to this file
+)

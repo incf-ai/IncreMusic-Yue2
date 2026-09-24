@@ -1,0 +1,15 @@
+// A GenerationParams preset (docs/DESIGN.md §5.1). Presets never store a run name.
+Preset(
+    params: GenerationParams(
+        lyrics: "[Verse]\n\n[Chorus]\n",
+        style: "English, indie pop, bright acoustic guitar, soft drums, warm lead vocal, polished demo mix",
+        cot: "full",
+        guidance_scale: 1.01,
+        num_inference_steps: 8,
+        abc_sampling: Sampling(temperature: 0.7, top_p: 0.9, top_k: 30, repetition_penalty: 1.005,
+                               penalty_window: 100, min_tokens: 32, max_tokens: 4096),
+        semantic_sampling: Sampling(temperature: 1.0, top_p: 0.95, top_k: 100, repetition_penalty: 1.2,
+                                    penalty_window: 50, min_tokens: 200, max_tokens: 9000),
+    ),
+    allow_no_abc: false,
+)

@@ -1,0 +1,53 @@
+[workspace]
+resolver = "3"
+members = ["crates/audiocpp-core", "crates/audiocpp-gui-core", "crates/audiocpp-gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+audiocpp-core = { path = "crates/audiocpp-core" }
+audiocpp-gui-core = { path = "crates/audiocpp-gui-core" }
+
+anyhow = "1"
+base64 = "0.23"
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+directories = "6"
+futures-util = "0.3"
+notify = "8"
+parking_lot = "0.12"
+rand = "0.10"
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
+ron = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.11"
+symphonia = { version = "0.6", default-features = false, features = ["aac", "isomp4", "wav", "pcm", "alac"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+trash = "5"
+ulid = { version = "3", features = ["serde"] }
+which = "8"
+mp4ameta = "0.13"
+nix = { version = "0.31", features = ["signal", "process"] }
+
+eframe = "0.36"
+egui = "0.36"
+egui_extras = "0.36"
+egui_kittest = "0.36"
+cpal = "0.18"
+rfd = "0.17"
+egui-phosphor = "0.14"
+
+axum = "0.8"
+tempfile = "3"
+pretty_assertions = "1"
+
+[workspace.lints.clippy]
+# Command/Event/WorkItem are low-frequency messages; boxing variants adds noise for no gain.
+large_enum_variant = "allow"
