@@ -288,13 +288,13 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../tests/fixtures/one_second.wav"
     );
-    const MP4: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/tiny.mp4");
+    const MP3: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/tiny.mp3");
 
     #[test]
-    fn decodes_wav_and_mp4() {
+    fn decodes_wav_and_mp3() {
         let w = decode_file(Path::new(WAV)).unwrap();
         assert_eq!((w.channels, w.sample_rate, w.frames()), (2, 48000, 48000));
-        let m = decode_file(Path::new(MP4)).unwrap();
+        let m = decode_file(Path::new(MP3)).unwrap();
         assert_eq!((m.channels, m.sample_rate), (2, 48000));
         assert!(m.frames() > 10_000, "{}", m.frames());
     }

@@ -38,7 +38,9 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("audiocpp-ui")
-            .with_inner_size([1280.0, 860.0]),
+            .with_inner_size([1280.0, 860.0])
+            // .abc and audio files can be dropped onto the Generate panel (§5.2)
+            .with_drag_and_drop(true),
         ..Default::default()
     };
     let config = Config::load(&path);

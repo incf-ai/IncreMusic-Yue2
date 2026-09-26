@@ -4,19 +4,24 @@
 pub mod form;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use audiocpp_core::library::{Location, Song};
+use audiocpp_core::config::ModelSpec;
+use audiocpp_core::history::{RunRecord, RunSummary};
 use audiocpp_core::media::{ExportFormat, Rating};
 use audiocpp_core::params::{GenerationParams, Preset};
 use audiocpp_core::playback::PlayState;
-use audiocpp_core::project::ProjectSummary;
+use audiocpp_core::project::{ProjectSummary, reference_play_id};
 use audiocpp_core::run::{
-    AbcSource, Collision, JobId, RunEdit, RunId, RunStatus, check_collision, next_free_seed,
+    AbcSource, Collision, JobId, RunEdit, RunId, RunStatus, check_collision,
+    next_free_seed,
 };
 use audiocpp_core::scheduler::{JobInfo, JobState, RunSnapshot, ServerId};
-use audiocpp_core::service::{Command, Event, InitInfo, LogLine, ServerInfo, ServerState};
+use audiocpp_core::service::{
+    Command, Event, InitInfo, LogLevel, LogLine, ServerInfo, ServerState,
+};
 use audiocpp_core::{LibraryCommand, SongId};
 
 pub use form::{AbcChoice, Blocker, GenerateForm};
@@ -28,6 +33,9 @@ pub enum Tab {
     #[default]
     Generate,
     Queue,
+    History,
+    Projects,
+    Inputs,
     Library,
     Review,
     Log,
@@ -37,6 +45,35 @@ pub enum Tab {
 pub struct ServerView {
     pub info: ServerInfo,
     pub state: ServerState,
+    /// Model paths this server reported missing (§1.1), from its last check.
+    pub path_problems: Vec<String>,
+    /// The app's messages about this server and the server's own output.
+    pub log: VecDeque<LogLine>,
+}
+
+/// Where a log line comes from, as the Log tab's toggles group them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum LogSource {
+    /// The app's own messages that aren't about a server (`core`, `library`, …).
+    App,
+    Server(ServerId),
+}
+
+/// Which sources the Log tab shows. It records the hidden ones, so everything (including a
+/// server added later) is shown by default.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct LogFilter {
+    pub hidden: BTreeSet<LogSource>,
+}
+
+impl LogFilter {
+    pub fn shows(&self, src: LogSource) -> bool {
+        !self.hidden.contains(&src)
+    }
+
+    pub fn shows_all(&self) -> bool {
+        self.hidden.is_empty()
+    }
 }
 
 /// Inline editor for an active run in the Queue panel (§5.1.2).
@@ -86,6 +123,8 @@ pub struct PlayerView {
     pub position: Duration,
     pub duration: Duration,
     pub peaks: Option<(SongId, Vec<f32>)>,
+    /// The tab playback was started from, so the global transport can name it.
+    pub tab: Option<Tab>,
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -93,6 +132,9 @@ pub struct ReviewState {
     /// Unreviewed songs in creation order, captured on entry and extended as songs arrive.
     pub queue: Vec<SongId>,
     pub index: usize,
+    /// The lyrics popup is open. It follows the review song and, unlike a [`Dialog`],
+    /// leaves the review keys working so the song can be played and rated while reading.
+    pub lyrics: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +143,15 @@ pub enum Focus {
     Rename,
     Name,
     Abc,
+    /// The ABC section's main button (*Load .abc…*).
+    AbcSection,
+}
+
+/// See [`AppState::drop_target`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropKind {
+    Abc,
+    Audio,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -120,7 +171,76 @@ pub enum Dialog {
         force: bool,
     },
     ConfirmDelete(Vec<SongId>),
+    /// Audio picked for transcription with no project name yet: asks for one, suggesting
+    /// the file's base name.
+    NameProject {
+        audio: PathBuf,
+        name: String,
+    },
+    /// Moving a project folder to the trash.
+    DeleteProject(String),
+    /// Loading a run into Generate would replace a form that has a name typed in.
+    ReplaceForm(FormLoad),
     Exit,
+}
+
+/// What to fill the Generate form from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormLoad {
+    /// A run in the live queue.
+    Queue(RunId),
+    /// The History tab's selected record, at a revision (`None` → the latest).
+    Record(Option<u32>),
+}
+
+/// The History tab: every recorded run, and the selected one's full record.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct HistoryView {
+    pub runs: Vec<RunSummary>,
+    pub selected: Option<RunId>,
+    pub record: Option<Result<RunRecord, String>>,
+    pub search: String,
+}
+
+impl HistoryView {
+    /// Rows matching the search, newest first.
+    pub fn filtered(&self) -> Vec<&RunSummary> {
+        let q = self.search.trim().to_lowercase();
+        self.runs
+            .iter()
+            .filter(|r| q.is_empty() || r.name.to_lowercase().contains(&q))
+            .collect()
+    }
+
+    /// The selected record, once loaded.
+    pub fn record(&self) -> Option<&RunRecord> {
+        match &self.record {
+            Some(Ok(r)) if Some(r.id) == self.selected => Some(r),
+            _ => None,
+        }
+    }
+}
+
+/// The Projects panel: the selected project and the rename draft.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct ProjectsView {
+    pub current: Option<String>,
+    pub rename: String,
+    pub search: String,
+    /// A rename sent to the core; the selection follows once the new name is listed.
+    pub renaming: Option<String>,
+}
+
+/// One reference audio in the Inputs panel. Projects holding the same file (by SHA-256)
+/// share a row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReferenceRow<'a> {
+    /// The first project holding the file; it is played and re-transcribed from there.
+    pub project: &'a ProjectSummary,
+    pub reference: &'a audiocpp_core::project::Reference,
+    pub projects: Vec<&'a ProjectSummary>,
+    /// A project that holds a transcription of this audio.
+    pub transcribed: Option<&'a ProjectSummary>,
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -147,8 +267,12 @@ pub struct AppState {
     pub player: PlayerView,
     pub review: ReviewState,
     pub projects: Vec<ProjectSummary>,
+    pub projects_view: ProjectsView,
+    pub history: HistoryView,
     pub transcribe: TranscribeView,
+    /// The app's messages that aren't about a server; server lines go to `ServerView::log`.
     pub log: VecDeque<LogLine>,
+    pub log_filter: LogFilter,
     pub dialog: Option<Dialog>,
     pub tab: Tab,
     pub focus: Option<Focus>,
@@ -170,6 +294,8 @@ pub enum ReviewKey {
     Prev,
     Tag,
     Rename,
+    /// Opens or closes the lyrics popup.
+    Lyrics,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -177,6 +303,8 @@ pub enum UiAction {
     SelectTab(Tab),
     // --- Generate form
     SetName(String),
+    /// Enter pressed in the Name field.
+    SubmitName,
     SetSeed(String),
     /// 🎲: the view passes a random value so `update` stays pure.
     RandomSeed(u32),
@@ -190,6 +318,17 @@ pub enum UiAction {
         contents: String,
     },
     TranscribeFile(PathBuf),
+    /// Edits the name in [`Dialog::NameProject`].
+    SetDialogName(String),
+    /// Fills Generate from a queued run or a history record (asks first over a named form).
+    LoadIntoForm(FormLoad),
+    RefreshHistory,
+    SelectHistoryRun(RunId),
+    SetHistorySearch(String),
+    /// Queues a new run continuing an interrupted one.
+    ResumeInterrupted(RunId),
+    /// A message for the status bar, e.g. why a dropped file was not used.
+    ShowStatus(String),
     Retranscribe,
     ContinueFromSeed(u32),
     LoadProjectInputs,
@@ -216,6 +355,8 @@ pub enum UiAction {
     PauseRun(RunId),
     ResumeRun(RunId),
     StopRun(RunId),
+    /// Only for runs that aren't active (paused, stopping or done).
+    RemoveRun(RunId),
     MoveRun(RunId, usize),
     CancelJob(JobId),
     ClearFinishedRuns,
@@ -227,6 +368,8 @@ pub enum UiAction {
     ClearSelection,
     Play(SongId),
     TogglePlay,
+    /// Pause or resume whatever is loaded, regardless of the selected song or tab.
+    PauseResume,
     Seek(Duration),
     SeekBy(f64),
     StopPlayback,
@@ -248,11 +391,34 @@ pub enum UiAction {
     },
     ContinueRun(SongId),
     Regenerate(SongId),
+    // --- Projects
+    SelectProject(String),
+    SetProjectSearch(String),
+    SetProjectRename(String),
+    RenameProject,
+    DeleteProject(String),
+    RefreshProjects,
+    /// Fills the Generate form from the project.
+    OpenProject(String),
+    /// Shows the project's songs in the Audio Library.
+    ShowProjectSongs(String),
+    // --- Inputs
+    PlayReference(String),
+    /// Loads a project's reference into the project named in the Generate form. A
+    /// transcription of the same audio is reused.
+    UseReference(String),
+    RetranscribeProject(String),
     // --- Review
     EnterReview,
     ReviewKey(ReviewKey),
+    /// Closes the review lyrics popup (Escape, click outside, *Close*).
+    CloseLyrics,
     FocusHandled,
     // --- App
+    ToggleLogSource(LogSource),
+    /// Shows every log source again.
+    ShowAllLogs,
+    /// Clears the lines of the shown sources.
     ClearLog,
     DismissStatus,
     RequestExit,
@@ -280,6 +446,31 @@ impl From<Event> for Input {
 // Derived views
 
 impl AppState {
+    /// The lines the Log tab shows: the shown sources' buffers merged by time.
+    pub fn log_lines(&self) -> Vec<&LogLine> {
+        let f = &self.log_filter;
+        let mut lines: Vec<&LogLine> = self
+            .servers
+            .iter()
+            .filter(|v| f.shows(LogSource::Server(v.info.id)))
+            .flat_map(|v| &v.log)
+            .collect();
+        if f.shows(LogSource::App) {
+            lines.extend(&self.log);
+        }
+        // stable, so each buffer keeps its own order
+        lines.sort_by_key(|l| l.time);
+        lines
+    }
+
+    /// The most recent error from any source.
+    pub fn last_error(&self) -> Option<&LogLine> {
+        std::iter::once(&self.log)
+            .chain(self.servers.iter().map(|v| &v.log))
+            .filter_map(|log| log.iter().rev().find(|l| l.level == LogLevel::Error))
+            .max_by_key(|l| l.time)
+    }
+
     pub fn song(&self, id: &SongId) -> Option<&Song> {
         self.library.get(id)
     }
@@ -308,17 +499,111 @@ impl AppState {
         self.projects.iter().find(|p| p.name == name.trim())
     }
 
+    pub fn current_project(&self) -> Option<&ProjectSummary> {
+        let name = self.projects_view.current.as_deref()?;
+        self.projects.iter().find(|p| p.name == name)
+    }
+
+    /// Projects matching the Projects panel's search, by name or reference file name.
+    pub fn filtered_projects(&self) -> Vec<&ProjectSummary> {
+        let q = self.projects_view.search.trim().to_lowercase();
+        self.projects
+            .iter()
+            .filter(|p| {
+                q.is_empty()
+                    || p.name.to_lowercase().contains(&q)
+                    || p.reference
+                        .as_ref()
+                        .is_some_and(|r| r.original_name.to_lowercase().contains(&q))
+            })
+            .collect()
+    }
+
+    /// Songs whose recipe names this project's run.
+    pub fn project_songs(&self, name: &str) -> usize {
+        self.library
+            .values()
+            .filter(|s| s.run_name().as_deref() == Some(name))
+            .count()
+    }
+
+    /// Why a project can't be renamed or deleted right now.
+    pub fn project_busy(&self, name: &str) -> Option<&'static str> {
+        if self
+            .runs
+            .iter()
+            .any(|r| r.state.status != RunStatus::Done && r.state.spec.name.as_str() == name)
+        {
+            return Some("A run in the queue is still writing to this project.");
+        }
+        if self.transcribe.project.as_deref() == Some(name) {
+            return Some("A transcription is writing to this project.");
+        }
+        None
+    }
+
+    /// Every reference audio across projects, one row per distinct file, by original name.
+    pub fn reference_rows(&self) -> Vec<ReferenceRow<'_>> {
+        let mut rows: Vec<ReferenceRow<'_>> = Vec::new();
+        for p in &self.projects {
+            let Some(r) = &p.reference else { continue };
+            match rows.iter_mut().find(|x| x.reference.sha256 == r.sha256) {
+                Some(row) => {
+                    row.projects.push(p);
+                    if row.transcribed.is_none() && p.transcription.is_some() {
+                        row.transcribed = Some(p);
+                    }
+                }
+                None => rows.push(ReferenceRow {
+                    project: p,
+                    reference: r,
+                    projects: vec![p],
+                    transcribed: p.transcription.is_some().then_some(p),
+                }),
+            }
+        }
+        rows.sort_by_key(|r| r.reference.original_name.to_lowercase());
+        rows
+    }
+
+    /// Whether the player holds this project's reference.
+    pub fn playing_reference(&self, project: &str) -> bool {
+        self.player.song.as_ref() == Some(&reference_play_id(project))
+    }
+
     /// "Load project inputs" is offered when the name matches an existing project.
     pub fn offers_project(&self) -> bool {
         self.form.name_result().is_ok() && self.project(&self.form.name).is_some()
     }
 
-    /// Why Load .abc / Transcribe are disabled (they need a project to save into).
+    /// Why Load .abc is disabled (they need a project to save into).
     pub fn inputs_blocker(&self) -> Option<&'static str> {
         self.form
             .name_result()
             .err()
             .map(|_| "Enter a name first. Inputs are saved to inputs/<name>/.")
+    }
+
+    /// What a file dropped onto the Generate panel does (§5.2): `.abc` files go into the
+    /// editor, anything else is transcribed (the core probes it with ffprobe).
+    pub fn drop_target(&self, files: &[PathBuf]) -> Result<(DropKind, PathBuf), String> {
+        let [path] = files else {
+            return Err("Drop one file at a time.".into());
+        };
+        let is_abc = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("abc"));
+        if is_abc {
+            // audio can be named after the fact, an ABC file has nowhere to go yet
+            if let Some(b) = self.inputs_blocker() {
+                return Err(b.into());
+            }
+            return Ok((DropKind::Abc, path.clone()));
+        }
+        if self.transcribe.project.is_some() {
+            return Err("A transcription is already running.".into());
+        }
+        Ok((DropKind::Audio, path.clone()))
     }
 
     pub fn filtered_songs(&self) -> Vec<&Song> {
@@ -361,9 +646,9 @@ impl AppState {
             .filter(|s| !f.only_no_abc || s.has_abc() == Some(false))
             .collect();
         v.sort_by(|a, b| {
-            b.created_at()
-                .cmp(&a.created_at())
-                .then(b.modified.cmp(&a.modified))
+            a.created_at()
+                .cmp(&b.created_at())
+                .then(a.modified.cmp(&b.modified))
                 .then(a.stem.cmp(&b.stem))
         });
         v
@@ -460,6 +745,13 @@ impl AppState {
         };
     }
 
+    /// Drops a run and everything the queue shows for it.
+    fn forget_run(&mut self, id: RunId) {
+        self.runs.retain(|r| r.state.id != id);
+        self.jobs.retain(|_, j| j.run_id != id);
+        self.editors.remove(&id);
+    }
+
     fn editor_for(r: &RunSnapshot) -> RunEditor {
         let mut params = r.state.spec.params.clone();
         let abc = params.abc.take().unwrap_or_default();
@@ -494,7 +786,17 @@ pub fn update(state: &mut AppState, input: impl Into<Input>) -> Vec<Command> {
     match input.into() {
         Input::Ui(a) => on_action(state, a),
         Input::Core(e) => {
+            let caught_up = state.tab == Tab::Review && state.review_song().is_none();
             on_event(state, e);
+            // a song arriving after the review ran out becomes the review song
+            if caught_up && state.review_song().is_some() {
+                if state.player.state == Some(PlayState::Playing) {
+                    state.current = state.review_song().cloned();
+                    state.refresh_meta_editor();
+                    return vec![];
+                }
+                return review_play_current(state);
+            }
             vec![]
         }
     }
@@ -509,16 +811,27 @@ fn on_event(s: &mut AppState, e: Event) {
                 .map(|i| ServerView {
                     info: i.clone(),
                     state: ServerState::Stopped,
+                    path_problems: Vec::new(),
+                    log: VecDeque::new(),
                 })
                 .collect();
             if let Some(p) = &info.default_preset {
                 apply_preset(&mut s.form, p, info.default_preset_path.clone());
             }
             s.init = Some(info);
+            // a new form: the name comes first (§5.2.1), then the ABC section (§5.2)
+            if s.focus.is_none() && s.form.name.is_empty() {
+                s.focus = Some(Focus::Name);
+            }
         }
         Event::ServerStatus(id, st) => {
             if let Some(v) = s.servers.get_mut(id.0) {
                 v.state = st;
+            }
+        }
+        Event::ModelPaths(id, problems) => {
+            if let Some(v) = s.servers.get_mut(id.0) {
+                v.path_problems = problems;
             }
         }
         Event::TranscribeStarted(p) => {
@@ -560,6 +873,13 @@ fn on_event(s: &mut AppState, e: Event) {
             }
             s.runs.sort_by_key(|r| r.position);
         }
+        Event::RunRemoved(id) => s.forget_run(id),
+        Event::RunHistory(list) => s.history.runs = list,
+        Event::RunRecord(id, r) => {
+            if s.history.selected == Some(id) {
+                s.history.record = Some(r);
+            }
+        }
         Event::JobUpdate(id, info) => {
             s.jobs.insert(id, info);
         }
@@ -598,7 +918,24 @@ fn on_event(s: &mut AppState, e: Event) {
                 s.meta.new_tag = editing.new_tag;
             }
         }
-        Event::Projects(p) => s.projects = p,
+        Event::Projects(p) => {
+            s.projects = p;
+            let pv = &mut s.projects_view;
+            if let Some(to) = pv.renaming.take()
+                && s.projects.iter().any(|p| p.name == to)
+            {
+                pv.rename = to.clone();
+                pv.current = Some(to);
+            }
+            if pv
+                .current
+                .as_ref()
+                .is_some_and(|c| !s.projects.iter().any(|p| &p.name == c))
+            {
+                pv.current = None;
+                pv.rename.clear();
+            }
+        }
         Event::ProjectInputs(r) => match r {
             Ok(inp) => {
                 if inp.name == s.form.name.trim() {
@@ -660,11 +997,19 @@ fn on_event(s: &mut AppState, e: Event) {
         }
         Event::Peaks(id, p) => s.player.peaks = Some((id, p)),
         Event::Log(l) => {
-            s.log.push_back(l);
-            while s.log.len() > MAX_LOG {
-                s.log.pop_front();
+            // each server has its own buffer, so a chatty one can't push out the others' lines
+            match s.servers.iter_mut().find(|v| v.info.name == l.source) {
+                Some(v) => push_capped(&mut v.log, l),
+                None => push_capped(&mut s.log, l),
             }
         }
+    }
+}
+
+fn push_capped(log: &mut VecDeque<LogLine>, l: LogLine) {
+    log.push_back(l);
+    while log.len() > MAX_LOG {
+        log.pop_front();
     }
 }
 
@@ -683,9 +1028,48 @@ fn on_action(s: &mut AppState, a: UiAction) -> Vec<Command> {
     match a {
         A::SelectTab(t) => {
             if t == Tab::Review && s.tab != Tab::Review {
-                return on_action(s, A::EnterReview);
+                // an ongoing review picks up where it left off; `EnterReview` restarts it
+                if s.review.queue.is_empty() {
+                    return on_action(s, A::EnterReview);
+                }
+                return resume_review(s);
             }
+            let entering_history = t == Tab::History && s.tab != Tab::History;
             s.tab = t;
+            if entering_history {
+                return on_action(s, A::RefreshHistory);
+            }
+            vec![]
+        }
+        A::RefreshHistory => {
+            let mut cmds = vec![Command::ListRuns];
+            if let Some(id) = s.history.selected {
+                cmds.push(Command::LoadRunRecord(id));
+            }
+            cmds
+        }
+        A::SelectHistoryRun(id) => {
+            if s.history.selected == Some(id) {
+                return vec![];
+            }
+            s.history.selected = Some(id);
+            s.history.record = None;
+            vec![Command::LoadRunRecord(id)]
+        }
+        A::SetHistorySearch(q) => {
+            s.history.search = q;
+            vec![]
+        }
+        A::ResumeInterrupted(id) => {
+            s.status = Some("Resuming the interrupted run; it's added to the queue".into());
+            vec![Command::ResumeInterrupted(id)]
+        }
+        A::LoadIntoForm(what) => {
+            if !s.form.name.trim().is_empty() {
+                s.dialog = Some(Dialog::ReplaceForm(what));
+                return vec![];
+            }
+            load_into_form(s, what);
             vec![]
         }
         A::SetName(n) => {
@@ -742,7 +1126,21 @@ fn on_action(s: &mut AppState, a: UiAction) -> Vec<Command> {
             s.form.abc_choice = AbcChoice::LoadFile;
             vec![]
         }
+        A::SubmitName => {
+            if s.form.name_result().is_ok()
+                && s.form.abc_text.trim().is_empty()
+                && s.form.abc_choice != AbcChoice::None
+            {
+                s.form.abc_section_open = true;
+                s.focus = Some(Focus::AbcSection);
+            }
+            vec![]
+        }
         A::TranscribeFile(audio) => transcribe(s, audio, false),
+        A::ShowStatus(why) => {
+            s.status = Some(why);
+            vec![]
+        }
         A::Retranscribe => match s.form.name_result() {
             Ok(name) => vec![Command::Retranscribe(name)],
             Err(_) => vec![],
@@ -823,6 +1221,26 @@ fn on_action(s: &mut AppState, a: UiAction) -> Vec<Command> {
                 }],
                 Err(_) => vec![],
             },
+            Some(Dialog::NameProject { audio, name }) => {
+                if audiocpp_core::run::RunName::parse(&name).is_err() {
+                    // the view disables the button; Enter on a bad name keeps the dialog open
+                    s.dialog = Some(Dialog::NameProject { audio, name });
+                    return vec![];
+                }
+                s.form.name = name.trim().to_string();
+                transcribe(s, audio, false)
+            }
+            Some(Dialog::ReplaceForm(what)) => {
+                load_into_form(s, what);
+                vec![]
+            }
+            Some(Dialog::DeleteProject(name)) => {
+                if let Some(why) = s.project_busy(&name) {
+                    s.status = Some(why.into());
+                    return vec![];
+                }
+                vec![Command::DeleteProject(name)]
+            }
             Some(Dialog::ConfirmDelete(ids)) => {
                 s.selected.clear();
                 ids.into_iter()
@@ -837,6 +1255,12 @@ fn on_action(s: &mut AppState, a: UiAction) -> Vec<Command> {
             }
             None => vec![],
         },
+        A::SetDialogName(n) => {
+            if let Some(Dialog::NameProject { name, .. }) = &mut s.dialog {
+                *name = n;
+            }
+            vec![]
+        }
         A::CancelDialog => {
             if s.dialog.take() == Some(Dialog::Exit) {
                 // "leave them running" is the default answer, handled by RequestExit twice
@@ -918,6 +1342,17 @@ fn on_action(s: &mut AppState, a: UiAction) -> Vec<Command> {
         A::PauseRun(id) => vec![Command::PauseRun(id)],
         A::ResumeRun(id) => vec![Command::ResumeRun(id)],
         A::StopRun(id) => vec![Command::StopRun(id)],
+        A::RemoveRun(id) => {
+            let removable = s
+                .runs
+                .iter()
+                .any(|r| r.state.id == id && r.state.status != RunStatus::Active);
+            if !removable {
+                return vec![];
+            }
+            s.forget_run(id);
+            vec![Command::RemoveRun(id)]
+        }
         A::MoveRun(id, to) => vec![Command::MoveRun(id, to)],
         A::CancelJob(id) => vec![Command::CancelJob(id)],
         A::ClearFinishedRuns => {
@@ -967,6 +1402,7 @@ fn on_action(s: &mut AppState, a: UiAction) -> Vec<Command> {
         A::Play(id) => {
             s.current = Some(id.clone());
             s.refresh_meta_editor();
+            s.player.tab = Some(s.tab);
             vec![Command::Play(id)]
         }
         A::TogglePlay => match (&s.player.state, &s.current) {
@@ -975,7 +1411,14 @@ fn on_action(s: &mut AppState, a: UiAction) -> Vec<Command> {
             {
                 vec![Command::TogglePause]
             }
-            (_, Some(id)) => vec![Command::Play(id.clone())],
+            (_, Some(id)) => {
+                s.player.tab = Some(s.tab);
+                vec![Command::Play(id.clone())]
+            }
+            _ => vec![],
+        },
+        A::PauseResume => match s.player.state {
+            Some(PlayState::Playing | PlayState::Paused) => vec![Command::TogglePause],
             _ => vec![],
         },
         A::Seek(d) => {
@@ -1104,21 +1547,154 @@ fn on_action(s: &mut AppState, a: UiAction) -> Vec<Command> {
             vec![]
         }
         A::Regenerate(id) => vec![Command::Regenerate(id)],
+        A::SelectProject(name) => {
+            s.projects_view.rename = name.clone();
+            s.projects_view.current = Some(name);
+            vec![]
+        }
+        A::SetProjectSearch(q) => {
+            s.projects_view.search = q;
+            vec![]
+        }
+        A::SetProjectRename(n) => {
+            s.projects_view.rename = n;
+            vec![]
+        }
+        A::RenameProject => {
+            let Some(from) = s.projects_view.current.clone() else {
+                return vec![];
+            };
+            let to = match audiocpp_core::run::RunName::parse(&s.projects_view.rename) {
+                Ok(n) => n,
+                Err(e) => {
+                    s.status = Some(format!("Rename: {e}"));
+                    return vec![];
+                }
+            };
+            if to.as_str() == from {
+                return vec![];
+            }
+            if s.project(to.as_str()).is_some() {
+                s.status = Some(format!("Rename: a project “{to}” already exists"));
+                return vec![];
+            }
+            if let Some(why) = s.project_busy(&from) {
+                s.status = Some(why.into());
+                return vec![];
+            }
+            s.projects_view.renaming = Some(to.to_string());
+            vec![Command::RenameProject(from, to)]
+        }
+        A::DeleteProject(name) => {
+            match s.project_busy(&name) {
+                Some(why) => s.status = Some(why.into()),
+                None => s.dialog = Some(Dialog::DeleteProject(name)),
+            }
+            vec![]
+        }
+        A::RefreshProjects => vec![Command::RefreshProjects],
+        A::OpenProject(name) => {
+            s.form.name = name.clone();
+            s.tab = Tab::Generate;
+            vec![Command::LoadProject(name)]
+        }
+        A::ShowProjectSongs(name) => {
+            s.filter = LibraryFilter {
+                run_name: name,
+                ..Default::default()
+            };
+            s.tab = Tab::Library;
+            vec![]
+        }
+        A::PlayReference(name) => {
+            if s.playing_reference(&name) {
+                return vec![Command::TogglePause];
+            }
+            s.player.tab = Some(Tab::Inputs);
+            vec![Command::PlayReference(name)]
+        }
+        A::UseReference(from) => {
+            let Some(audio) = s.project(&from).and_then(|p| p.reference_path()) else {
+                return vec![];
+            };
+            if let Some(b) = s.inputs_blocker() {
+                s.status = Some(b.into());
+                s.tab = Tab::Generate;
+                s.focus = Some(Focus::Name);
+                return vec![];
+            }
+            if s.transcribe.project.is_some() {
+                s.status = Some("A transcription is already running.".into());
+                return vec![];
+            }
+            s.tab = Tab::Generate;
+            s.form.abc_section_open = true;
+            let sha = |name: &str| {
+                s.project(name)
+                    .and_then(|p| p.reference.as_ref())
+                    .map(|r| r.sha256.clone())
+            };
+            match s.form.name_result() {
+                // the same audio is already there: nothing to replace, so no dialog
+                Ok(project) if sha(project.as_str()) == sha(&from) => vec![Command::Transcribe {
+                    project,
+                    audio,
+                    force: false,
+                }],
+                _ => transcribe(s, audio, false),
+            }
+        }
+        A::RetranscribeProject(name) => {
+            if s.transcribe.project.is_some() {
+                s.status = Some("A transcription is already running.".into());
+                return vec![];
+            }
+            match audiocpp_core::run::RunName::parse(&name) {
+                Ok(n) => vec![Command::Retranscribe(n)],
+                Err(e) => {
+                    s.status = Some(format!("{name}: {e}"));
+                    vec![]
+                }
+            }
+        }
         A::EnterReview => {
             s.tab = Tab::Review;
             s.review = ReviewState {
                 queue: s.unreviewed_in_order(),
                 index: 0,
+                lyrics: s.review.lyrics,
             };
             review_play_current(s)
         }
         A::ReviewKey(k) => review_key(s, k),
+        A::CloseLyrics => {
+            s.review.lyrics = false;
+            vec![]
+        }
         A::FocusHandled => {
             s.focus = None;
             vec![]
         }
+        A::ToggleLogSource(src) => {
+            let hidden = &mut s.log_filter.hidden;
+            if !hidden.remove(&src) {
+                hidden.insert(src);
+            }
+            vec![]
+        }
+        A::ShowAllLogs => {
+            s.log_filter.hidden.clear();
+            vec![]
+        }
         A::ClearLog => {
-            s.log.clear();
+            let f = &s.log_filter;
+            if f.shows(LogSource::App) {
+                s.log.clear();
+            }
+            s.servers
+                .iter_mut()
+                .filter(|v| f.shows(LogSource::Server(v.info.id)))
+                .for_each(|v| v.log.clear());
             vec![]
         }
         A::DismissStatus => {
@@ -1147,6 +1723,8 @@ fn on_action(s: &mut AppState, a: UiAction) -> Vec<Command> {
 
 fn transcribe(s: &mut AppState, audio: PathBuf, force: bool) -> Vec<Command> {
     let Ok(project) = s.form.name_result() else {
+        let name = suggested_name(&audio);
+        s.dialog = Some(Dialog::NameProject { audio, name });
         return vec![];
     };
     if s.project(project.as_str()).is_some_and(|p| p.has_reference) {
@@ -1160,6 +1738,27 @@ fn transcribe(s: &mut AppState, audio: PathBuf, force: bool) -> Vec<Command> {
     }]
 }
 
+/// A project name from an audio file's base name, with characters names can't hold
+/// replaced so the suggestion is usually valid as is.
+fn suggested_name(audio: &Path) -> String {
+    let stem = audio
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_control() || "/\\:*?\"<>|".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .take(audiocpp_core::run::MAX_NAME_LEN)
+        .collect();
+    name.trim().trim_end_matches('.').to_string()
+}
+
 fn start_run(s: &mut AppState) -> Vec<Command> {
     let Some(model) = s.model() else {
         return vec![];
@@ -1170,8 +1769,11 @@ fn start_run(s: &mut AppState) -> Vec<Command> {
                 "Started run “{}” from seed {}",
                 spec.name, spec.start_seed
             ));
-            // every new run needs a name typed on purpose
-            s.form.name.clear();
+            // keep the name; move the seed past this run so the next one
+            // doesn't collide (an open-ended run has no known end)
+            if let Some(n) = spec.count {
+                s.form.seed = spec.start_seed.saturating_add(n).to_string();
+            }
             vec![Command::StartRun(spec)]
         }
         Err(e) => {
@@ -1192,25 +1794,102 @@ fn continue_run(s: &mut AppState, id: &SongId) {
     };
     let req = recipe.request.get("request").cloned().unwrap_or_default();
     match GenerationParams::from_request(&req) {
-        Ok((params, _)) => {
-            s.form.name = recipe.run.name.clone();
-            s.form.load_params(&params);
-            s.form.abc_source = recipe.abc_source.clone();
-            s.form.abc_choice = match recipe.abc_source {
-                AbcSource::None => AbcChoice::None,
-                AbcSource::File { .. } => AbcChoice::LoadFile,
-                AbcSource::Transcribed(_) => AbcChoice::Transcribe,
-                AbcSource::Manual => AbcChoice::Paste,
-            };
-            let seeds = s.seeds_for(&recipe.run.name);
-            s.form.seed = next_free_seed(&seeds)
-                .unwrap_or(recipe.run.seed.saturating_add(1))
-                .to_string();
-            s.tab = Tab::Generate;
-            s.focus = Some(Focus::Name);
-        }
+        Ok((params, _)) => fill_form(
+            s,
+            &recipe.run.name,
+            &params,
+            &recipe.abc_source,
+            recipe.run.seed.saturating_add(1),
+            None,
+        ),
         Err(e) => s.status = Some(format!("Recipe: {e}")),
     }
+}
+
+/// Fills Generate from a queued run or a history record so it can be started again. The
+/// seed continues after everything the run and the library already used.
+fn load_into_form(s: &mut AppState, what: FormLoad) {
+    let (name, params, abc, next_seed, count, model) = match what {
+        FormLoad::Queue(id) => {
+            let Some(r) = s.runs.iter().find(|r| r.state.id == id) else {
+                s.status = Some("That run is no longer in the queue".into());
+                return;
+            };
+            let st = &r.state;
+            (
+                st.spec.name.clone(),
+                st.spec.params.clone(),
+                st.spec.abc_source.clone(),
+                st.next_seed,
+                st.spec.count,
+                st.spec.model.clone(),
+            )
+        }
+        FormLoad::Record(rev) => {
+            let Some(r) = s.history.record() else {
+                s.status = Some("Select a run in History first".into());
+                return;
+            };
+            let Some(v) = r.revision(rev) else {
+                s.status = Some(format!("Run “{}” has no revision {rev:?}", r.name));
+                return;
+            };
+            (
+                r.name.clone(),
+                v.params.clone(),
+                v.abc_source.clone(),
+                r.next_seed,
+                r.count,
+                r.model.clone(),
+            )
+        }
+    };
+    fill_form(s, name.as_str(), &params, &abc, next_seed, Some(count));
+    warn_model(s, &model);
+}
+
+fn warn_model(s: &mut AppState, model: &ModelSpec) {
+    if let Some(now) = s.model()
+        && now.id != model.id
+    {
+        s.status = Some(format!(
+            "That run used model “{}”; Generate uses the configured “{}”",
+            model.id, now.id
+        ));
+    }
+}
+
+/// Puts a run's inputs into the Generate form and focuses the name. `seed_floor` is the
+/// lowest seed to continue from; the library's next free seed wins if it's higher.
+/// `count: Some(_)` also sets the count (`Some(None)` → until stopped).
+fn fill_form(
+    s: &mut AppState,
+    name: &str,
+    params: &GenerationParams,
+    abc: &AbcSource,
+    seed_floor: u32,
+    count: Option<Option<u32>>,
+) {
+    s.form.name = name.to_string();
+    s.form.load_params(params);
+    s.form.abc_source = abc.clone();
+    s.form.abc_choice = match abc {
+        AbcSource::None => AbcChoice::None,
+        AbcSource::File { .. } => AbcChoice::LoadFile,
+        AbcSource::Transcribed(_) => AbcChoice::Transcribe,
+        AbcSource::Manual => AbcChoice::Paste,
+    };
+    let seeds = s.seeds_for(name);
+    let seed = next_free_seed(&seeds).map_or(seed_floor, |n| n.max(seed_floor));
+    s.form.seed = seed.to_string();
+    if let Some(c) = count {
+        s.form.until_stopped = c.is_none();
+        if let Some(c) = c {
+            s.form.count = c.to_string();
+        }
+    }
+    s.tab = Tab::Generate;
+    s.focus = Some(Focus::Name);
 }
 
 fn review_play_current(s: &mut AppState) -> Vec<Command> {
@@ -1218,6 +1897,7 @@ fn review_play_current(s: &mut AppState) -> Vec<Command> {
         Some(id) => {
             s.current = Some(id.clone());
             s.refresh_meta_editor();
+            s.player.tab = Some(Tab::Review);
             vec![Command::Play(id)]
         }
         None => {
@@ -1227,9 +1907,50 @@ fn review_play_current(s: &mut AppState) -> Vec<Command> {
     }
 }
 
+/// Returns to the Review tab without restarting the current song or losing the place in
+/// the queue. Songs deleted meanwhile drop out, new unreviewed ones join the end, and a
+/// current song rated elsewhere is skipped.
+fn resume_review(s: &mut AppState) -> Vec<Command> {
+    s.tab = Tab::Review;
+    let r = &mut s.review;
+    let before = r.queue[..r.index.min(r.queue.len())]
+        .iter()
+        .filter(|id| s.library.contains_key(*id))
+        .count();
+    r.queue.retain(|id| s.library.contains_key(id));
+    r.index = before;
+    for id in s.unreviewed_in_order() {
+        if !s.review.queue.contains(&id) {
+            s.review.queue.push(id);
+        }
+    }
+    while s
+        .review_song()
+        .and_then(|id| s.song(id))
+        .is_some_and(|song| song.location != Location::Unreviewed)
+    {
+        s.review.index += 1;
+    }
+    let Some(id) = s.review_song().cloned() else {
+        s.current = None;
+        return vec![];
+    };
+    // keep the review song, or a song playing from another tab, going
+    if s.player.song.as_ref() == Some(&id) || s.player.state == Some(PlayState::Playing) {
+        s.current = Some(id);
+        s.refresh_meta_editor();
+        return vec![];
+    }
+    review_play_current(s)
+}
+
 fn review_key(s: &mut AppState, k: ReviewKey) -> Vec<Command> {
     match k {
-        ReviewKey::PlayPause => vec![Command::TogglePause],
+        // Space starts the review song if another tab's song is loaded
+        ReviewKey::PlayPause => match s.review_song() {
+            Some(id) if s.player.song.as_ref() != Some(id) => review_play_current(s),
+            _ => vec![Command::TogglePause],
+        },
         ReviewKey::Back { big } => vec![Command::SeekBy(if big { -30.0 } else { -5.0 })],
         ReviewKey::Forward { big } => vec![Command::SeekBy(if big { 30.0 } else { 5.0 })],
         ReviewKey::Rate(r) => {
@@ -1251,12 +1972,19 @@ fn review_key(s: &mut AppState, k: ReviewKey) -> Vec<Command> {
             s.review.index = s.review.index.saturating_sub(1);
             review_play_current(s)
         }
+        // the fields sit behind the lyrics popup
         ReviewKey::Tag => {
+            s.review.lyrics = false;
             s.focus = Some(Focus::Tag);
             vec![]
         }
         ReviewKey::Rename => {
+            s.review.lyrics = false;
             s.focus = Some(Focus::Rename);
+            vec![]
+        }
+        ReviewKey::Lyrics => {
+            s.review.lyrics = !s.review.lyrics;
             vec![]
         }
     }

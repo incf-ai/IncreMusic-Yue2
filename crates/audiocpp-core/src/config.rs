@@ -123,43 +123,28 @@ pub struct LibraryConfig {
     pub root: PathBuf,
     #[serde(default)]
     pub encoder: Encoder,
-    #[serde(default)]
-    pub extension: Extension,
 }
 
+/// LAME settings for the library MP3 (§6.1).
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoder {
-    Aac { bitrate_kbps: u32 },
-    Alac,
+    /// Variable bitrate, LAME `-V<quality>`: 0 (best, ~245 kbps) to 9.
+    Vbr { quality: u8 },
+    /// Constant bitrate, 32–320 kbps.
+    Cbr { bitrate_kbps: u32 },
 }
 
 impl Default for Encoder {
     fn default() -> Self {
-        Encoder::Aac { bitrate_kbps: 256 }
+        Encoder::Vbr { quality: 0 }
     }
 }
 
 impl Encoder {
     pub fn describe(&self) -> String {
         match self {
-            Encoder::Aac { bitrate_kbps } => format!("aac {bitrate_kbps}k"),
-            Encoder::Alac => "alac".into(),
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum Extension {
-    #[default]
-    Mp4,
-    M4a,
-}
-
-impl Extension {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Extension::Mp4 => "mp4",
-            Extension::M4a => "m4a",
+            Encoder::Vbr { quality } => format!("mp3 V{quality}"),
+            Encoder::Cbr { bitrate_kbps } => format!("mp3 {bitrate_kbps}k"),
         }
     }
 }
@@ -237,12 +222,14 @@ impl Config {
                 problems.push(format!("models.{what}: `id` and `path` are required"));
             }
         }
-        if let Encoder::Aac { bitrate_kbps } = self.library.encoder
-            && !(32..=512).contains(&bitrate_kbps)
-        {
-            problems.push(format!(
-                "library.encoder: bitrate {bitrate_kbps} kbps out of range 32–512"
-            ));
+        match self.library.encoder {
+            Encoder::Vbr { quality } if quality > 9 => problems.push(format!(
+                "library.encoder: VBR quality {quality} out of range 0–9"
+            )),
+            Encoder::Cbr { bitrate_kbps } if !(32..=320).contains(&bitrate_kbps) => problems.push(
+                format!("library.encoder: bitrate {bitrate_kbps} kbps out of range 32–320"),
+            ),
+            _ => {}
         }
         if problems.is_empty() {
             Ok(())
@@ -342,7 +329,7 @@ Config(
     ),
     library: Library(
         root: "/music/audiocpp",
-        encoder: Aac(bitrate_kbps: 256),
+        encoder: Vbr(quality: 0),
     ),
     defaults: "presets/default.ron",
 )
@@ -359,8 +346,7 @@ Config(
             cfg.models.yue2.session_options["yue2.model_gguf"],
             "yue2-3b-bf16.gguf"
         );
-        assert_eq!(cfg.library.encoder, Encoder::Aac { bitrate_kbps: 256 });
-        assert_eq!(cfg.library.extension, Extension::Mp4);
+        assert_eq!(cfg.library.encoder, Encoder::Vbr { quality: 0 });
         assert_eq!(cfg.defaults, Some(PathBuf::from("presets/default.ron")));
     }
 
@@ -435,12 +421,19 @@ Config(
                 .to_string()
                 .contains("server_binary")
         );
-        let bad_rate = EXAMPLE.replace("bitrate_kbps: 256", "bitrate_kbps: 5");
+        let bad_rate = EXAMPLE.replace("Vbr(quality: 0)", "Cbr(bitrate_kbps: 5)");
         assert!(
             Config::parse(&bad_rate)
                 .unwrap_err()
                 .to_string()
                 .contains("bitrate")
+        );
+        let bad_quality = EXAMPLE.replace("Vbr(quality: 0)", "Vbr(quality: 10)");
+        assert!(
+            Config::parse(&bad_quality)
+                .unwrap_err()
+                .to_string()
+                .contains("quality")
         );
     }
 
@@ -451,7 +444,7 @@ Config(
                 yue2: ModelSpec(id: "yue2", family: "yue2", task: "gen", path: "/m/y"),
                 sheetsage2: ModelSpec(id: "sheetsage2", family: "sheetsage2", task: "midi", path: "/m/s"),
             ),
-            library: Library(root: "/tmp/lib", encoder: Alac),
+            library: Library(root: "/tmp/lib", encoder: Cbr(bitrate_kbps: 320)),
         )"#;
         let cfg = Config::parse(text).unwrap();
         assert!(cfg.servers.is_empty());

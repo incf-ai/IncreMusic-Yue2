@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{from_ron, to_ron};
 use crate::error::{Error, IoContext, Result};
 use crate::fsutil;
+use crate::library::SongId;
 use crate::media::Ffmpeg;
 use crate::params::GenerationParams;
 use crate::run::{AbcSource, ReferenceAudio, RunId, RunName};
@@ -82,11 +83,37 @@ pub struct ProjectInputs {
     pub has_reference: bool,
 }
 
-/// One entry of the project list shown in the Generate panel.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// One entry of the project list (Generate, Projects and Inputs panels).
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct ProjectSummary {
     pub name: String,
     pub has_reference: bool,
+    #[serde(default)]
+    pub dir: PathBuf,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub reference: Option<Reference>,
+    /// Size of the original reference file, if it is still there.
+    #[serde(default)]
+    pub reference_bytes: Option<u64>,
+    #[serde(default)]
+    pub transcription: Option<Transcription>,
+    #[serde(default)]
+    pub abc: Option<AbcFile>,
+    /// Runs that used this project.
+    #[serde(default)]
+    pub runs: usize,
+    /// Why `project.ron` could not be read.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl ProjectSummary {
+    /// The original reference file inside the project folder.
+    pub fn reference_path(&self) -> Option<PathBuf> {
+        self.reference.as_ref().map(|r| self.dir.join(&r.file))
+    }
 }
 
 /// A reference that has been probed, copied and converted, ready to upload.
@@ -135,16 +162,66 @@ impl ProjectStore {
         self.list()
             .into_iter()
             .map(|name| {
-                let has_reference = self
-                    .load(&name)
-                    .map(|p| p.reference.is_some())
-                    .unwrap_or(false);
-                ProjectSummary {
-                    name,
-                    has_reference,
+                let dir = self.dir(&name);
+                match self.load(&name) {
+                    Ok(p) => ProjectSummary {
+                        has_reference: p.reference.is_some(),
+                        reference_bytes: p
+                            .reference
+                            .as_ref()
+                            .and_then(|r| std::fs::metadata(dir.join(&r.file)).ok())
+                            .map(|m| m.len()),
+                        created_at: p.created_at,
+                        reference: p.reference,
+                        transcription: p.transcription,
+                        abc: p.abc,
+                        runs: p.runs.len(),
+                        name,
+                        dir,
+                        error: None,
+                    },
+                    Err(e) => ProjectSummary {
+                        name,
+                        dir,
+                        error: Some(e.to_string()),
+                        ..Default::default()
+                    },
                 }
             })
             .collect()
+    }
+
+    /// Renames `inputs/<from>/` to `inputs/<to>/`, along with its `<from>.abc`. Songs keep
+    /// naming the old run in their recipes.
+    pub fn rename(&self, from: &str, to: &RunName) -> Result<()> {
+        let (src, dst) = (self.dir(from), self.dir(to.as_str()));
+        if !self.exists(from) {
+            return Err(Error::Other(format!("no project `{from}`")));
+        }
+        if dst.exists() {
+            return Err(Error::Other(format!("a project `{to}` already exists")));
+        }
+        std::fs::rename(&src, &dst).at(&dst)?;
+        let mut p = self.load(to.as_str())?;
+        p.name = to.to_string();
+        let old_abc = format!("{from}.abc");
+        if let Some(a) = p.abc.as_mut().filter(|a| a.file == old_abc) {
+            let new_abc = format!("{to}.abc");
+            if dst.join(&old_abc).is_file() {
+                std::fs::rename(dst.join(&old_abc), dst.join(&new_abc)).at(dst.join(&new_abc))?;
+            }
+            a.file = new_abc;
+        }
+        self.save(&p)
+    }
+
+    /// Moves the whole project folder to the system trash.
+    pub fn trash(&self, name: &str) -> Result<()> {
+        let dir = self.dir(name);
+        if !self.exists(name) {
+            return Err(Error::Other(format!("no project `{name}`")));
+        }
+        trash::delete(&dir).map_err(|e| Error::Other(format!("trash {name}: {e}")))
     }
 
     /// The project's original reference file, if any.
@@ -411,6 +488,12 @@ impl ProjectStore {
     }
 }
 
+/// The id the player uses while a project's reference plays. It never matches a song:
+/// song ids have no `/`.
+pub fn reference_play_id(project: &str) -> SongId {
+    SongId(format!("inputs/{project}"))
+}
+
 fn reference_audio(r: &Reference, t: Option<&Transcription>) -> ReferenceAudio {
     ReferenceAudio {
         file_name: r.original_name.clone(),
@@ -499,5 +582,55 @@ mod tests {
             .unwrap();
         assert!(!dir.join("song.abc").exists());
         assert_eq!(s.load("song").unwrap().runs.len(), 1);
+    }
+
+    #[test]
+    fn rename_moves_the_folder_and_its_abc() {
+        let d = tempfile::tempdir().unwrap();
+        let s = ProjectStore::new(d.path());
+        let name = RunName::parse("old").unwrap();
+        let params = GenerationParams {
+            abc: Some("X:1\nK:C\n".into()),
+            ..Default::default()
+        };
+        s.write_run_inputs(&name, &params, &AbcSource::Manual, Some(RunId::new()))
+            .unwrap();
+        s.write_run_inputs(
+            &RunName::parse("taken").unwrap(),
+            &params,
+            &AbcSource::Manual,
+            None,
+        )
+        .unwrap();
+
+        let err = s.rename("old", &RunName::parse("taken").unwrap());
+        assert!(err.is_err(), "an existing project is never overwritten");
+        assert!(s.rename("missing", &RunName::parse("x").unwrap()).is_err());
+
+        s.rename("old", &RunName::parse("new").unwrap()).unwrap();
+        assert!(!d.path().join("old").exists());
+        let p = s.load("new").unwrap();
+        assert_eq!(p.name, "new");
+        assert_eq!(p.abc.unwrap().file, "new.abc");
+        assert_eq!(s.inputs("new").unwrap().abc.as_deref(), Some("X:1\nK:C\n"));
+
+        let sums = s.summaries();
+        assert_eq!(
+            sums.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["new", "taken"]
+        );
+        assert_eq!(sums[0].runs, 1);
+        assert_eq!(sums[0].dir, d.path().join("new"));
+        assert_eq!(sums[0].reference_path(), None);
+    }
+
+    #[test]
+    fn unreadable_projects_are_still_listed() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("bad")).unwrap();
+        std::fs::write(d.path().join("bad").join(PROJECT_FILE), "nonsense").unwrap();
+        let sums = ProjectStore::new(d.path()).summaries();
+        assert_eq!(sums.len(), 1);
+        assert!(sums[0].error.is_some());
     }
 }

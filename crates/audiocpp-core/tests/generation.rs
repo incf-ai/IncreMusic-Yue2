@@ -75,15 +75,15 @@ fn two_servers_share_a_run_and_write_song_folders() {
     for seed in 1230..1236 {
         let dir = song_dir(lib.path(), "sunny-hook", seed);
         let stem = format!("sunny-hook-{seed}");
-        let mp4 = dir.join(format!("{stem}.mp4"));
+        let mp3 = dir.join(format!("{stem}.mp3"));
         let wav = dir.join(format!("{stem}.wav"));
-        assert!(mp4.is_file(), "{}", mp4.display());
+        assert!(mp3.is_file(), "{}", mp3.display());
         assert_eq!(
             std::fs::read(&wav).unwrap(),
             wav_for_seed(seed as u64),
             "WAV is the server's audio byte for byte"
         );
-        let meta = media::read_meta(&mp4).unwrap();
+        let meta = media::read_meta(&mp3).unwrap();
         assert_eq!(meta.title.as_deref(), Some(stem.as_str()));
         let r = meta.recipe.unwrap();
         assert_eq!(
@@ -101,7 +101,7 @@ fn two_servers_share_a_run_and_write_song_folders() {
             r.output.wav_sha256,
             audiocpp_core::fsutil::sha256_hex(&wav_for_seed(seed as u64))
         );
-        assert_eq!(r.output.encoder, "aac 128k");
+        assert_eq!(r.output.encoder, "mp3 128k");
         assert_eq!(r.timing.audio_duration_ms, Some(100));
         assert_eq!(r.server.backend.as_deref(), Some("mock"));
         assert_eq!(r.project, "sunny-hook");
@@ -152,7 +152,7 @@ fn params_edit_mid_run_applies_to_unstarted_jobs_only() {
     h.until("3 songs", LONG, |h| h.done_jobs() == 3);
 
     let recipe = |seed| {
-        media::read_meta(&song_dir(lib.path(), "edit", seed).join(format!("edit-{seed}.mp4")))
+        media::read_meta(&song_dir(lib.path(), "edit", seed).join(format!("edit-{seed}.mp3")))
             .unwrap()
             .recipe
             .unwrap()
@@ -199,7 +199,7 @@ fn crashed_server_job_is_requeued_on_the_other() {
     for seed in 0..3 {
         assert!(
             song_dir(lib.path(), "crash", seed)
-                .join(format!("crash-{seed}.mp4"))
+                .join(format!("crash-{seed}.mp3"))
                 .is_file()
         );
     }
@@ -301,7 +301,7 @@ fn cancelling_a_running_job_keeps_the_connection_and_discards_the_result() {
     );
     assert!(
         song_dir(lib.path(), "cancel", 6)
-            .join("cancel-6.mp4")
+            .join("cancel-6.mp3")
             .is_file()
     );
     assert_eq!(a.state.max_in_flight.load(Ordering::SeqCst), 1);
@@ -476,11 +476,11 @@ fn regenerate_saves_a_new_take_next_to_the_original() {
         .unwrap();
     h.send(Command::Regenerate(song));
     h.until("2 songs", LONG, |h| h.done_jobs() == 2);
-    let take = lib.path().join("unreviewed/regen-7-r2/regen-7-r2.mp4");
+    let take = lib.path().join("unreviewed/regen-7-r2/regen-7-r2.mp3");
     assert!(take.is_file());
     let r = media::read_meta(&take).unwrap().recipe.unwrap();
     assert_eq!(r.run.seed, 7);
-    let orig = media::read_meta(&lib.path().join("unreviewed/regen-7/regen-7.mp4"))
+    let orig = media::read_meta(&lib.path().join("unreviewed/regen-7/regen-7.mp3"))
         .unwrap()
         .recipe
         .unwrap();
@@ -498,7 +498,7 @@ fn name_collision_at_write_time_gets_a_suffix() {
     h.wait_ready(1);
     h.send(Command::StartRun(spec("dup", 1, Some(1))));
     h.until("1 song", LONG, |h| h.done_jobs() == 1);
-    assert!(lib.path().join("unreviewed/dup-1-2/dup-1-2.mp4").is_file());
+    assert!(lib.path().join("unreviewed/dup-1-2/dup-1-2.mp3").is_file());
     assert!(lib.path().join("unreviewed/dup-1-2/dup-1-2.wav").is_file());
     h.core.shutdown(false);
 }
@@ -529,4 +529,112 @@ fn ensure_loaded_reloads_when_session_options_change() {
         a.state.calls(),
         vec!["load yue2", "unload yue2", "load yue2"]
     );
+}
+
+#[test]
+fn every_run_is_recorded_in_history_and_an_interrupted_one_resumes() {
+    use audiocpp_core::history::{RecordStatus, SeedOutcome};
+    require_ffmpeg!();
+    let a = MockServer::start("a");
+    let lib = tempfile::tempdir().unwrap();
+    let first = {
+        let mut h = Harness::start(config(lib.path(), &[a.port]));
+        h.wait_ready(1);
+        h.send(Command::StartRun(spec("kept", 40, Some(1))));
+        h.until("song", LONG, |h| h.done_jobs() == 1);
+        let mut p = spec("kept", 0, None).params;
+        p.style = "jazz".into();
+        // quits while seed 7 is still generating; seeds 8 and 9 never start
+        *a.state.gen_delay.lock() = Duration::from_secs(5);
+        h.send(Command::StartRun(spec("unfinished", 7, Some(3))));
+        h.until("running", LONG, |h| {
+            h.jobs
+                .values()
+                .any(|j| j.seed == 7 && matches!(j.state, JobState::Running { .. }))
+        });
+        let id = h.jobs.values().find(|j| j.seed == 7).unwrap().run_id;
+        h.send(Command::PauseRun(id));
+        h.send(Command::EditRun(id, RunEdit::Params(p)));
+        h.pump(Duration::from_millis(200));
+        h.core.shutdown(false);
+        id
+    };
+    *a.state.gen_delay.lock() = Duration::from_millis(50);
+    let mut h = Harness::start(config(lib.path(), &[a.port]));
+    h.wait_ready(1);
+    h.send(Command::ListRuns);
+    h.until("history", LONG, |h| {
+        h.find(|e| match e {
+            Event::RunHistory(l) if l.len() == 2 => Some(()),
+            _ => None,
+        })
+        .is_some()
+    });
+    h.send(Command::LoadRunRecord(first));
+    h.until("record", LONG, |h| {
+        h.find(|e| match e {
+            Event::RunRecord(id, Ok(r)) if *id == first => Some(()),
+            _ => None,
+        })
+        .is_some()
+    });
+    let r = h
+        .find(|e| match e {
+            Event::RunRecord(_, Ok(r)) => Some(r.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(r.status, RecordStatus::Interrupted);
+    assert_eq!(r.revisions.len(), 2, "the edit made while paused is kept");
+    assert_eq!(r.revisions[1].params.style, "jazz");
+    let kept = h
+        .find(|e| match e {
+            Event::RunHistory(l) => l.iter().find(|s| s.name == "kept").cloned(),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!((kept.status, kept.done), (RecordStatus::Done, 1));
+
+    h.send(Command::ResumeInterrupted(first));
+    h.until("resumed songs", LONG, |h| h.done_jobs() == 3);
+    let seeds: BTreeSet<u32> = h.jobs.values().map(|j| j.seed).collect();
+    assert_eq!(
+        seeds,
+        (7..10).collect(),
+        "seed 7 was running at quit, 8 and 9 never started"
+    );
+    h.send(Command::ListRuns);
+    h.until("3 records", LONG, |h| {
+        h.find(|e| match e {
+            Event::RunHistory(l) if l.len() == 3 => Some(()),
+            _ => None,
+        })
+        .is_some()
+    });
+    let resumed = h
+        .find(|e| match e {
+            Event::RunHistory(l) if l.len() == 3 => Some(l[0].id),
+            _ => None,
+        })
+        .unwrap();
+    h.send(Command::LoadRunRecord(resumed));
+    h.until("resumed record", LONG, |h| {
+        h.find(|e| match e {
+            Event::RunRecord(id, Ok(r)) if *id == resumed && r.status == RecordStatus::Done => {
+                Some(())
+            }
+            _ => None,
+        })
+        .is_some()
+    });
+    let r = h
+        .find(|e| match e {
+            Event::RunRecord(id, Ok(r)) if *id == resumed => Some(r.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(r.resumed_from, Some(first));
+    assert_eq!(r.revisions[0].params.style, "jazz", "resumes with the latest params");
+    assert!(r.seeds.iter().all(|s| matches!(s.outcome, SeedOutcome::Song(_))));
+    h.core.shutdown(false);
 }

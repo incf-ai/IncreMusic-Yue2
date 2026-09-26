@@ -5,7 +5,7 @@
 use std::ffi::OsStr;
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use crate::config::{Config, Launch, ServerConfig, TerminalMode};
@@ -92,6 +92,15 @@ impl LaunchPlan {
         self.run_dir.join(format!("{}.{ext}", self.name))
     }
 
+    /// Everything the server prints (Unix launcher script); the core tails it into the log.
+    pub fn log_path(&self) -> PathBuf {
+        log_path(&self.run_dir, &self.name)
+    }
+
+    fn fifo_path(&self) -> PathBuf {
+        self.run_dir.join(format!("{}.fifo", self.name))
+    }
+
     pub fn desktop_path(&self) -> PathBuf {
         self.run_dir.join(format!("{}.desktop", self.name))
     }
@@ -105,11 +114,24 @@ impl LaunchPlan {
             "echo $$ > {}\n",
             sh_quote(&self.pidfile().to_string_lossy())
         );
+        // copy all output to the log file through a FIFO, so it still shows in the
+        // terminal and `exec` keeps the server's PID the one in the pidfile
+        let fifo = sh_quote(&self.fifo_path().to_string_lossy());
+        s += &format!("rm -f {fifo} && mkfifo {fifo} || exit 1\n");
+        s += &format!(
+            "tee {} < {fifo} &\n",
+            sh_quote(&self.log_path().to_string_lossy())
+        );
+        s += &format!("exec > {fifo} 2>&1\nrm -f {fifo}\n");
         if let Some(d) = &self.working_dir {
             s += &format!("cd {} || exit 1\n", sh_quote(&d.to_string_lossy()));
         }
         let cmd: Vec<String> = self.argv.iter().map(|a| sh_quote(a)).collect();
-        s += &format!("exec {}\n", cmd.join(" "));
+        let cmd = cmd.join(" ");
+        // stdout is a pipe now, so stdio would buffer it in blocks; stdbuf (GNU coreutils)
+        // keeps it line by line, and execs the server so the PID stays the same
+        s += &format!("command -v stdbuf >/dev/null 2>&1 && exec stdbuf -oL {cmd}\n");
+        s += &format!("exec {cmd}\n");
         s
     }
 
@@ -154,6 +176,7 @@ impl LaunchPlan {
     pub fn write_files(&self, os: TargetOs) -> Result<PathBuf> {
         std::fs::create_dir_all(&self.run_dir).at(&self.run_dir)?;
         let _ = std::fs::remove_file(self.pidfile());
+        let _ = std::fs::remove_file(self.log_path());
         let script = self.script_path(os);
         let body = match os {
             TargetOs::Windows => self.windows_cmd(),
@@ -180,6 +203,10 @@ fn make_executable(p: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn make_executable(_: &Path) -> Result<()> {
     Ok(())
+}
+
+pub fn log_path(run_dir: &Path, name: &str) -> PathBuf {
+    run_dir.join(format!("{name}.log"))
 }
 
 pub fn sh_quote(s: &str) -> String {
@@ -330,9 +357,12 @@ pub fn runtime_dir() -> PathBuf {
 // Launching
 
 pub enum Launched {
-    /// Running in a terminal the app doesn't own; track it by pidfile.
-    Detached,
-    /// `Headless`: the app owns the process and its output.
+    /// Running in a terminal the app doesn't own; track it by pidfile. `opener` is the
+    /// command that opened the terminal, with its stdout/stderr piped: when it fails
+    /// (e.g. no terminal emulator), its output is the only explanation.
+    Detached { opener: tokio::process::Child },
+    /// `Headless`: the app owns the process. On Unix its output reaches the log through
+    /// the log file, like the other modes; on Windows through the child's pipes.
     Headless(tokio::process::Child),
 }
 
@@ -366,8 +396,15 @@ pub fn launch(plan: &LaunchPlan, mode: &TerminalMode, opener: Option<&Opener>) -
                 c
             };
             let _ = script;
+            // Unix: the script sends the server's output to the log file, and tee copies
+            // it to stdout, which nobody reads; stderr still has the script's own errors
+            let stdout = if os == TargetOs::Windows {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            };
             cmd.stdin(Stdio::null())
-                .stdout(Stdio::piped())
+                .stdout(stdout)
                 .stderr(Stdio::piped());
             let child = cmd
                 .spawn()
@@ -383,8 +420,9 @@ pub fn launch(plan: &LaunchPlan, mode: &TerminalMode, opener: Option<&Opener>) -
             plan.write_files(os)?;
             let script = plan.script_path(os);
             let argv = expand_command(template, &script, &plan.name);
-            spawn_detached(&argv)?;
-            Ok(Launched::Detached)
+            Ok(Launched::Detached {
+                opener: spawn_opener(&argv)?,
+            })
         }
         TerminalMode::Native => {
             let file = plan.write_files(os)?;
@@ -393,28 +431,25 @@ pub fn launch(plan: &LaunchPlan, mode: &TerminalMode, opener: Option<&Opener>) -
                     "no terminal opener found (gio, kioclient, dex, xdg-open); set `terminal: Command([...])` in the config".into(),
                 )
             })?;
-            spawn_detached(&opener.argv(&file, &plan.title()))?;
-            Ok(Launched::Detached)
+            Ok(Launched::Detached {
+                opener: spawn_opener(&opener.argv(&file, &plan.title()))?,
+            })
         }
     }
 }
 
-fn spawn_detached(argv: &[String]) -> Result<()> {
+/// Starts the command that opens a terminal. The caller reaps it and reads its output.
+fn spawn_opener(argv: &[String]) -> Result<tokio::process::Child> {
     let (bin, args) = argv
         .split_first()
         .ok_or_else(|| Error::Launcher("empty command".into()))?;
-    let mut child = Command::new(bin)
+    tokio::process::Command::new(bin)
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| Error::Launcher(format!("`{bin}`: {e}")))?;
-    // reap the opener in the background (it usually exits right away)
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
+        .map_err(|e| Error::Launcher(format!("`{bin}`: {e}")))
 }
 
 // ---------------------------------------------------------------------------------------
@@ -452,7 +487,7 @@ pub fn pid_alive(pid: u32) -> bool {
 
 #[cfg(windows)]
 pub fn pid_alive(pid: u32) -> bool {
-    Command::new("tasklist")
+    std::process::Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/NH"])
         .output()
         .map(|o| {
@@ -481,7 +516,7 @@ pub fn terminate(pid: u32, force: bool) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        let mut c = Command::new("taskkill");
+        let mut c = std::process::Command::new("taskkill");
         c.args(["/PID", &pid.to_string(), "/T"]);
         if force {
             c.arg("/F");
@@ -531,7 +566,12 @@ mod tests {
 # generated by audiocpp-ui — gpu1
 printf '\033]0;%s\007' 'audiocpp gpu1 :9123'
 echo $$ > /run/user/1000/audiocpp-ui/gpu1.pid
+rm -f /run/user/1000/audiocpp-ui/gpu1.fifo && mkfifo /run/user/1000/audiocpp-ui/gpu1.fifo || exit 1
+tee /run/user/1000/audiocpp-ui/gpu1.log < /run/user/1000/audiocpp-ui/gpu1.fifo &
+exec > /run/user/1000/audiocpp-ui/gpu1.fifo 2>&1
+rm -f /run/user/1000/audiocpp-ui/gpu1.fifo
 cd /opt/audiocpp || exit 1
+command -v stdbuf >/dev/null 2>&1 && exec stdbuf -oL ./audiocpp_server --ui --ui-management --log --backend vulkan --device 1 --port 9123
 exec ./audiocpp_server --ui --ui-management --log --backend vulkan --device 1 --port 9123
 "#
         );
@@ -662,7 +702,10 @@ exec ./audiocpp_server --ui --ui-management --log --backend vulkan --device 1 --
     fn pid_tracking() {
         assert!(pid_alive(std::process::id()));
         assert!(!pid_alive(0));
-        let mut c = Command::new("sleep").arg("0").spawn().unwrap();
+        let mut c = std::process::Command::new("sleep")
+            .arg("0")
+            .spawn()
+            .unwrap();
         let pid = c.id();
         c.wait().unwrap();
         assert!(!pid_alive(pid));

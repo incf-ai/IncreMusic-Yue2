@@ -20,6 +20,7 @@ use crate::library::{Library, LibraryCommand, LibraryDelta, SongId};
 use crate::media::{
     self, Ffmpeg, Recipe, RecipeModel, RecipeOutput, RecipeRun, RecipeServer, SongMeta,
 };
+use crate::history::{Origin, Recorder, RunHistory, RunRecord, RunSummary};
 use crate::params::{GenerationParams, Preset};
 use crate::playback::{self, PlayState, Playback};
 use crate::project::{ProjectInputs, ProjectStore, ProjectSummary};
@@ -53,13 +54,29 @@ pub enum Command {
     PauseRun(RunId),
     ResumeRun(RunId),
     StopRun(RunId),
+    /// Deletes a paused, stopping or finished run; its unfinished jobs are cancelled.
+    RemoveRun(RunId),
     MoveRun(RunId, usize),
     CancelJob(JobId),
     ClearFinishedRuns,
     /// Same request as the song's recipe, saved as a new take `<stem>-rN` (§6.2).
     Regenerate(SongId),
+    /// Re-reads the run history and sends [`Event::RunHistory`].
+    ListRuns,
+    /// Sends [`Event::RunRecord`] with one run's full record.
+    LoadRunRecord(RunId),
+    /// Queues a new run that continues an `Interrupted` record where it stopped.
+    ResumeInterrupted(RunId),
     Library(LibraryCommand),
     LoadProject(String),
+    /// Re-reads `inputs/` and sends [`Event::Projects`].
+    RefreshProjects,
+    /// Renames a project folder (§5.2.1). Songs keep the old run name in their recipes.
+    RenameProject(String, RunName),
+    /// Moves a project folder to the system trash.
+    DeleteProject(String),
+    /// Plays a project's original reference audio.
+    PlayReference(String),
     LoadPreset(PathBuf),
     SavePreset(PathBuf, Preset),
     Play(SongId),
@@ -125,6 +142,9 @@ pub struct ServerInfo {
     pub launchable: bool,
     pub backend: Option<String>,
     pub device: Option<u32>,
+    /// Where the launcher script saves the server's output (Unix, launchable servers).
+    #[serde(default)]
+    pub log_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -139,7 +159,7 @@ pub struct InitInfo {
     pub ffmpeg: Result<String, String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum LogLevel {
     Info,
     Warn,
@@ -152,15 +172,23 @@ pub struct LogLine {
     pub level: LogLevel,
     pub source: String,
     pub message: String,
+    /// A line the server itself printed, rather than a message from the app.
+    #[serde(default)]
+    pub output: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Event {
     Init(InitInfo),
     ServerStatus(ServerId, ServerState),
+    /// Configured model paths this server reports missing or of the wrong kind (§1.1),
+    /// checked each time it becomes ready. Empty: all present.
+    ModelPaths(ServerId, Vec<String>),
     TranscribeStarted(String),
     TranscribeDone(Result<AbcScore, String>),
     RunUpdate(RunSnapshot),
+    /// The run was deleted from the queue, along with its jobs.
+    RunRemoved(RunId),
     JobUpdate(JobId, JobInfo),
     LibraryChanged(LibraryDelta),
     Projects(Vec<ProjectSummary>),
@@ -178,6 +206,9 @@ pub enum Event {
         duration: Duration,
     },
     Peaks(SongId, Vec<f32>),
+    /// Every recorded run, newest first.
+    RunHistory(Vec<RunSummary>),
+    RunRecord(RunId, Result<RunRecord, String>),
     Log(LogLine),
 }
 
@@ -216,6 +247,7 @@ impl EventTx {
             level,
             source: source.into(),
             message,
+            output: false,
         }));
     }
 }
@@ -226,6 +258,9 @@ impl SchedulerEvents for EventTx {
     }
     fn run(&self, snap: RunSnapshot) {
         self.send(Event::RunUpdate(snap));
+    }
+    fn run_removed(&self, id: RunId) {
+        self.send(Event::RunRemoved(id));
     }
 }
 
@@ -341,6 +376,120 @@ impl Drop for CoreHandle {
 }
 
 // ---------------------------------------------------------------------------------------
+// Server output
+
+/// Reads what was appended to a log file since the last call, as whole lines.
+#[derive(Default)]
+struct LogTail {
+    pos: u64,
+    pending: Vec<u8>,
+    /// Starting mid-file: the first line is probably cut off.
+    skip_first: bool,
+}
+
+impl LogTail {
+    /// A line longer than this without a newline is shown anyway.
+    const MAX_LINE: usize = 16 * 1024;
+
+    fn read(&mut self, path: &Path) -> Vec<String> {
+        use std::io::{Read, Seek, SeekFrom};
+        let Ok(mut f) = std::fs::File::open(path) else {
+            return vec![];
+        };
+        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+        if len < self.pos {
+            // truncated or replaced (relaunch)
+            self.pos = 0;
+            self.pending.clear();
+            self.skip_first = false;
+        }
+        if len == self.pos || f.seek(SeekFrom::Start(self.pos)).is_err() {
+            return vec![];
+        }
+        let mut buf = Vec::new();
+        if f.take(len - self.pos).read_to_end(&mut buf).is_err() {
+            return vec![];
+        }
+        self.pos += buf.len() as u64;
+        self.pending.extend_from_slice(&buf);
+        let mut lines = Vec::new();
+        while let Some(i) = self.pending.iter().position(|&b| b == b'\n') {
+            let raw: Vec<u8> = self.pending.drain(..=i).collect();
+            lines.push(String::from_utf8_lossy(&raw[..i]).into_owned());
+        }
+        if self.pending.len() > Self::MAX_LINE {
+            lines.extend(self.flush());
+        }
+        if self.skip_first && !lines.is_empty() {
+            self.skip_first = false;
+            lines.remove(0);
+        }
+        lines
+            .iter()
+            .map(|l| clean_output_line(l))
+            .filter(|l| !l.trim().is_empty())
+            .collect()
+    }
+
+    /// Whatever is left without a newline.
+    fn flush(&mut self) -> Vec<String> {
+        let raw = std::mem::take(&mut self.pending);
+        let l = clean_output_line(&String::from_utf8_lossy(&raw));
+        if l.trim().is_empty() { vec![] } else { vec![l] }
+    }
+}
+
+/// What a terminal would show for one line of output: ANSI escape sequences removed, and
+/// only the text after the last carriage return (progress bars redraw with `\r`).
+pub fn clean_output_line(line: &str) -> String {
+    let line = line.trim_end_matches('\r');
+    let line = line.rsplit('\r').next().unwrap_or(line);
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            // CSI: parameters, then a final byte in @..~
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC (e.g. window title): up to BEL or ESC \
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' || (c == '\u{1b}' && chars.next_if_eq(&'\\').is_some()) {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Highlights server output that looks like a warning or an error.
+pub fn output_level(line: &str) -> LogLevel {
+    let l = line.to_ascii_lowercase();
+    if ["error", "fatal", "panic", "failed", "exception"]
+        .iter()
+        .any(|w| l.contains(w))
+    {
+        LogLevel::Error
+    } else if l.contains("warn") {
+        LogLevel::Warn
+    } else {
+        LogLevel::Info
+    }
+}
+
+// ---------------------------------------------------------------------------------------
 // Service internals
 
 struct SlotState {
@@ -351,6 +500,8 @@ struct SlotState {
     /// Launched by this app (or we found its pidfile).
     launched: bool,
     headless_exited: Option<Arc<AtomicBool>>,
+    /// Stops the task that follows the server's log file.
+    log_tail: Option<watch::Sender<bool>>,
     stop_sent_at: Option<Instant>,
     killed: bool,
     health_failures: u32,
@@ -370,6 +521,8 @@ struct Ctx {
     sched: Arc<Scheduler>,
     library: Arc<Mutex<Library>>,
     projects: ProjectStore,
+    /// `None` if `runs/` couldn't be opened; runs still work, unrecorded.
+    runs: Option<Arc<RunHistory>>,
     ffmpeg: Ffmpeg,
     playback: Arc<Playback>,
     slots: Vec<Slot>,
@@ -457,6 +610,7 @@ impl Service {
                     worker_stop: None,
                     launched: false,
                     headless_exited: None,
+                    log_tail: None,
                     stop_sent_at: None,
                     killed: false,
                     health_failures: 0,
@@ -470,8 +624,28 @@ impl Service {
         };
         let ffmpeg = Ffmpeg::from_config(&cfg);
         let projects = ProjectStore::new(library.inputs_dir());
+        let runs_dir = library.root().join(crate::library::RUNS);
+        let (runs, interrupted) = match RunHistory::open(&runs_dir) {
+            Ok((h, n)) => (Some(h), n),
+            Err(e) => {
+                ev.log(
+                    LogLevel::Error,
+                    "history",
+                    format!("run history off: {}: {e}", runs_dir.display()),
+                );
+                (None, 0)
+            }
+        };
+        let sched = match &runs {
+            Some(h) => Scheduler::new(Box::new(Recorder {
+                inner: ev.clone(),
+                history: h.clone(),
+            })),
+            None => Scheduler::new(Box::new(ev.clone())),
+        };
         let ctx = Arc::new(Ctx {
-            sched: Arc::new(Scheduler::new(Box::new(ev.clone()))),
+            sched: Arc::new(sched),
+            runs,
             ev: ev.clone(),
             library: Arc::new(Mutex::new(library)),
             projects,
@@ -487,6 +661,14 @@ impl Service {
         });
 
         Self::startup(&ctx, &opts).await;
+        if interrupted > 0 {
+            ctx.log(
+                LogLevel::Info,
+                "history",
+                format!("{interrupted} run(s) from the last session were interrupted; resume them from History"),
+            );
+        }
+        Self::send_history(&ctx).await;
 
         let mut monitors = Vec::new();
         for i in 0..ctx.slots.len() {
@@ -516,7 +698,13 @@ impl Service {
                     | Command::RefreshServers
                     | Command::Retranscribe(_)
                     | Command::Regenerate(_)
+                    | Command::ListRuns
+                    | Command::LoadRunRecord(_)
+                    | Command::ResumeInterrupted(_)
                     | Command::LoadProject(_)
+                    | Command::RefreshProjects
+                    | Command::RenameProject(..)
+                    | Command::DeleteProject(_)
                     | Command::LoadPreset(_)
                     | Command::SavePreset(..)
                     | Command::Play(_)
@@ -537,6 +725,9 @@ impl Service {
             if let Some(w) = s.st.lock().worker_stop.take() {
                 let _ = w.send(true);
             }
+        }
+        if let Some(h) = &ctx.runs {
+            h.close();
         }
     }
 
@@ -586,6 +777,8 @@ impl Service {
                     launchable: s.cfg.launch.is_some(),
                     backend: s.cfg.launch.as_ref().map(|l| l.backend.clone()),
                     device: s.cfg.launch.as_ref().and_then(|l| l.device),
+                    log_file: (cfg!(unix) && s.cfg.launch.is_some())
+                        .then(|| launcher::log_path(&ctx.run_dir, &s.cfg.name)),
                 })
                 .collect(),
             library_root: ctx.cfg.library.root.clone(),
@@ -687,7 +880,7 @@ impl Service {
                     ),
                 }
             }
-            Command::StartRun(spec) => Self::start_run(ctx, spec, None).await,
+            Command::StartRun(spec) => Self::start_run(ctx, spec, Origin::default()).await,
             Command::EditRun(id, edit) => match ctx.sched.edit_run(id, &edit) {
                 Ok(state) => {
                     if let RunEdit::Params(_) | RunEdit::AbcSource(_) = edit {
@@ -711,10 +904,17 @@ impl Service {
             Command::PauseRun(id) => Self::log_err(ctx, "queue", ctx.sched.pause_run(id)),
             Command::ResumeRun(id) => Self::log_err(ctx, "queue", ctx.sched.resume_run(id)),
             Command::StopRun(id) => Self::log_err(ctx, "queue", ctx.sched.stop_run(id)),
+            Command::RemoveRun(id) => Self::log_err(ctx, "queue", ctx.sched.remove_run(id)),
             Command::MoveRun(id, to) => Self::log_err(ctx, "queue", ctx.sched.move_run(id, to)),
             Command::CancelJob(id) => Self::log_err(ctx, "queue", ctx.sched.cancel_job(id)),
             Command::ClearFinishedRuns => ctx.sched.clear_done(),
             Command::Regenerate(song) => Self::regenerate(ctx, song).await,
+            Command::ListRuns => Self::send_history(ctx).await,
+            Command::LoadRunRecord(id) => {
+                let r = Self::load_record(ctx, id).await;
+                ctx.ev.send(Event::RunRecord(id, r));
+            }
+            Command::ResumeInterrupted(id) => Self::resume_interrupted(ctx, id).await,
             Command::Library(lc) => Self::library_cmd(ctx, lc),
             Command::LoadProject(name) => {
                 let p = ctx.projects.clone();
@@ -724,6 +924,38 @@ impl Service {
                     .and_then(|r| r.map_err(|e| e.to_string()));
                 ctx.ev.send(Event::ProjectInputs(r));
             }
+            Command::RefreshProjects => Self::send_projects(ctx).await,
+            Command::RenameProject(from, to) => {
+                let p = ctx.projects.clone();
+                let (f2, t2) = (from.clone(), to.clone());
+                match tokio::task::spawn_blocking(move || p.rename(&f2, &t2)).await {
+                    Ok(Ok(())) => {
+                        ctx.log(LogLevel::Info, "project", format!("renamed {from} → {to}"))
+                    }
+                    Ok(Err(e)) => {
+                        ctx.log(LogLevel::Error, "project", format!("rename {from}: {e}"))
+                    }
+                    Err(e) => ctx.log(LogLevel::Error, "project", e.to_string()),
+                }
+                Self::send_projects(ctx).await;
+            }
+            Command::DeleteProject(name) => {
+                let p = ctx.projects.clone();
+                let n2 = name.clone();
+                match tokio::task::spawn_blocking(move || p.trash(&n2)).await {
+                    Ok(Ok(())) => ctx.log(
+                        LogLevel::Info,
+                        "project",
+                        format!("moved {name} to the trash"),
+                    ),
+                    Ok(Err(e)) => {
+                        ctx.log(LogLevel::Error, "project", format!("delete {name}: {e}"))
+                    }
+                    Err(e) => ctx.log(LogLevel::Error, "project", e.to_string()),
+                }
+                Self::send_projects(ctx).await;
+            }
+            Command::PlayReference(name) => Self::play_reference(ctx, name),
             Command::LoadPreset(path) => {
                 let r = tokio::task::spawn_blocking(move || Preset::load(&path).map(|p| (path, p)))
                     .await
@@ -808,11 +1040,23 @@ impl Service {
                 st.stop_sent_at = None;
                 st.killed = false;
                 st.health_failures = 0;
-                if let Launched::Headless(child) = launched {
-                    st.headless_exited =
-                        Some(Self::watch_headless(ctx.clone(), s.cfg.name.clone(), child));
-                } else {
-                    st.headless_exited = None;
+                match launched {
+                    Launched::Headless(child) => {
+                        st.headless_exited =
+                            Some(Self::watch_headless(ctx.clone(), s.cfg.name.clone(), child));
+                    }
+                    Launched::Detached { opener } => {
+                        st.headless_exited = None;
+                        tokio::spawn(Self::watch_opener(ctx.clone(), id, opener));
+                    }
+                }
+                if cfg!(unix) {
+                    st.log_tail = Some(Self::tail_log(
+                        ctx.clone(),
+                        s.cfg.name.clone(),
+                        plan.log_path(),
+                        false,
+                    ));
                 }
                 ctx.set_state(
                     s,
@@ -867,9 +1111,10 @@ impl Service {
                     while let Ok(Some(line)) = lines.next_line().await {
                         ctx.ev.send(Event::Log(LogLine {
                             time: SystemTime::now(),
-                            level,
+                            level: output_level(&line).max(level),
                             source: name.clone(),
-                            message: line,
+                            message: clean_output_line(&line),
+                            output: true,
                         }));
                     }
                 });
@@ -882,6 +1127,90 @@ impl Service {
             tracing::info!("{name} exited: {status:?}");
         });
         exited
+    }
+
+    /// Reaps the command that opened the terminal. If it fails, the server never started,
+    /// and its output (e.g. gio's "Unable to find terminal") is the only explanation.
+    async fn watch_opener(ctx: Arc<Ctx>, id: ServerId, opener: tokio::process::Child) {
+        let Some(s) = ctx.slot(id) else { return };
+        let Ok(out) = opener.wait_with_output().await else {
+            return;
+        };
+        let text = [&out.stdout[..], &out.stderr[..]]
+            .map(String::from_utf8_lossy)
+            .join("\n");
+        let lines: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        if out.status.success() {
+            for l in lines {
+                ctx.log(LogLevel::Info, &s.cfg.name, format!("terminal opener: {l}"));
+            }
+            return;
+        }
+        let why = if lines.is_empty() {
+            format!("terminal opener failed ({})", out.status)
+        } else {
+            format!(
+                "terminal opener failed ({}): {}",
+                out.status,
+                lines.join(" / ")
+            )
+        };
+        ctx.log(LogLevel::Error, &s.cfg.name, why.clone());
+        let started = launcher::read_pid(&Self::pidfile(&ctx, s)).is_some();
+        if !started && matches!(s.st.lock().state, ServerState::Starting { .. }) {
+            if matches!(ctx.cfg.terminal, crate::config::TerminalMode::Native) {
+                ctx.log(
+                    LogLevel::Error,
+                    &s.cfg.name,
+                    "no terminal could be opened; install a terminal emulator, or set `terminal: Headless` or `terminal: Command([...])` in the config",
+                );
+            }
+            Self::mark_down(&ctx, id, &why, false);
+        }
+    }
+
+    /// Follows the log file the launcher script writes (everything the server prints) into
+    /// the log, until the returned sender is dropped or set. `from_end`: start with only the
+    /// last few KB (attaching to a server launched earlier).
+    fn tail_log(ctx: Arc<Ctx>, name: String, path: PathBuf, from_end: bool) -> watch::Sender<bool> {
+        const BACKLOG: u64 = 16 * 1024;
+        let (tx, mut stop) = watch::channel(false);
+        tokio::spawn(async move {
+            let mut tail = LogTail::default();
+            if from_end {
+                let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                tail.pos = len.saturating_sub(BACKLOG);
+                tail.skip_first = tail.pos > 0;
+            }
+            loop {
+                let stopping = tokio::select! {
+                    r = stop.changed() => r.is_err() || *stop.borrow(),
+                    _ = tokio::time::sleep(Duration::from_millis(250)) => false,
+                };
+                let stopping = stopping || ctx.shutting_down.load(Ordering::SeqCst);
+                let mut lines = tail.read(&path);
+                if stopping {
+                    lines.extend(tail.flush());
+                }
+                for line in lines {
+                    ctx.ev.send(Event::Log(LogLine {
+                        time: SystemTime::now(),
+                        level: output_level(&line),
+                        source: name.clone(),
+                        message: line,
+                        output: true,
+                    }));
+                }
+                if stopping {
+                    break;
+                }
+            }
+        });
+        tx
     }
 
     fn pidfile(ctx: &Ctx, s: &Slot) -> PathBuf {
@@ -956,6 +1285,11 @@ impl Service {
                 loaded_models: loaded,
             },
         );
+        let log = launcher::log_path(&ctx.run_dir, &s.cfg.name);
+        if st.log_tail.is_none() && log.is_file() {
+            // launched earlier (e.g. by a previous session of the app): show its output
+            st.log_tail = Some(Self::tail_log(ctx.clone(), s.cfg.name.clone(), log, true));
+        }
         if st.worker_stop.is_none() {
             let (tx, rx) = watch::channel(false);
             st.worker_stop = Some(tx);
@@ -963,6 +1297,27 @@ impl Service {
         }
         drop(st);
         ctx.sched.wake();
+        tokio::spawn(Self::check_model_paths(ctx.clone(), id));
+    }
+
+    /// Asks the server whether the configured model files exist (`/v1/ui/path-status`).
+    /// Only warns: the server stays usable, and a load would fail with the server's error.
+    async fn check_model_paths(ctx: Arc<Ctx>, id: ServerId) {
+        let Some(s) = ctx.slot(id) else { return };
+        let m = &ctx.cfg.models;
+        match models::check_paths(&s.client, &[&m.yue2, &m.sheetsage2]).await {
+            Ok(problems) => {
+                for p in &problems {
+                    ctx.log(LogLevel::Warn, &s.cfg.name, format!("model path: {p}"));
+                }
+                ctx.ev.send(Event::ModelPaths(id, problems));
+            }
+            Err(e) => ctx.log(
+                LogLevel::Info,
+                &s.cfg.name,
+                format!("can't check model paths (needs --ui-management): {e}"),
+            ),
+        }
     }
 
     fn mark_down(ctx: &Ctx, id: ServerId, reason: &str, hold: bool) {
@@ -1012,6 +1367,8 @@ impl Service {
                     if !alive && !port_open {
                         st.launched = false;
                         st.headless_exited = None;
+                        // the tail task reads the last output, then ends
+                        st.log_tail = None;
                         let _ = std::fs::remove_file(Self::pidfile(&ctx, s));
                         ctx.set_state(s, &mut st, ServerState::Stopped);
                         drop(st);
@@ -1039,7 +1396,12 @@ impl Service {
                         if pid_gone {
                             Self::mark_down(&ctx, id, "server exited during startup", false);
                         } else if since.elapsed().unwrap_or_default() > Duration::from_secs(60) {
-                            Self::mark_down(&ctx, id, "no healthy /health within 60 s", false);
+                            let why = if pid.is_none() {
+                                "no healthy /health within 60 s; the launcher script never ran (no pidfile)"
+                            } else {
+                                "no healthy /health within 60 s"
+                            };
+                            Self::mark_down(&ctx, id, why, false);
                         }
                     }
                 },
@@ -1321,8 +1683,8 @@ impl Service {
         server: RecipeServer,
     ) -> Result<LibraryDelta> {
         let wav = part.join(format!("{stem}.wav"));
-        let mp4 = part.join(format!("{stem}.{}", ctx.cfg.library.extension.as_str()));
-        ctx.ffmpeg.encode(&wav, &mp4, ctx.cfg.library.encoder)?;
+        let mp3 = part.join(format!("{stem}.mp3"));
+        ctx.ffmpeg.encode(&wav, &mp3, ctx.cfg.library.encoder)?;
         let song_id = ulid::Ulid::generate().to_string();
         let recipe = Recipe {
             schema: media::RECIPE_SCHEMA,
@@ -1358,14 +1720,14 @@ impl Service {
             recipe: Some(recipe),
             ..Default::default()
         };
-        media::write_meta(&mp4, &meta)?;
+        media::write_meta(&mp3, &meta)?;
         ctx.library.lock().commit(stem, part)
     }
 
     // -----------------------------------------------------------------------------------
     // Runs, transcription, library, playback
 
-    async fn start_run(ctx: &Arc<Ctx>, spec: RunSpec, regenerate_of: Option<String>) {
+    async fn start_run(ctx: &Arc<Ctx>, spec: RunSpec, origin: Origin) {
         let problems = spec.params.validate();
         if !problems.is_empty() {
             ctx.log(
@@ -1400,7 +1762,10 @@ impl Service {
                 spec.name, spec.start_seed
             ),
         );
-        ctx.sched.add_run_with(id, spec, regenerate_of);
+        if let Some(h) = &ctx.runs {
+            h.note_origin(id, origin.clone());
+        }
+        ctx.sched.add_run_with(id, spec, origin.regenerate_of);
         ctx.ev.send(Event::Projects(ctx.projects.summaries()));
     }
 
@@ -1441,7 +1806,11 @@ impl Service {
                     abc_source: recipe.abc_source.clone(),
                 };
                 let base = recipe.run.name.clone() + "-" + &recipe.run.seed.to_string();
-                Self::start_run(ctx, spec, Some(base)).await;
+                let origin = Origin {
+                    regenerate_of: Some(base),
+                    resumed_from: None,
+                };
+                Self::start_run(ctx, spec, origin).await;
             }
             Err(e) => ctx.log(LogLevel::Error, "library", format!("{}: {e}", s.stem)),
         }
@@ -1550,7 +1919,7 @@ impl Service {
         });
         let ctx = ctx.clone();
         tokio::spawn(async move {
-            let path = s.mp4.clone();
+            let path = s.mp3.clone();
             let res = tokio::task::spawn_blocking(move || playback::decode_file(&path)).await;
             match res {
                 Ok(Ok(decoded)) => {
@@ -1569,6 +1938,107 @@ impl Service {
                 Err(e) => ctx.log(LogLevel::Error, "playback", e.to_string()),
             }
         });
+    }
+
+    fn play_reference(ctx: &Arc<Ctx>, name: String) {
+        let Some(path) = ctx.projects.reference_path(&name) else {
+            ctx.log(
+                LogLevel::Warn,
+                "playback",
+                format!("{name}: no reference audio"),
+            );
+            return;
+        };
+        let id = crate::project::reference_play_id(&name);
+        ctx.playback.set_loading(id.clone());
+        ctx.ev.send(Event::PlaybackState {
+            state: PlayState::Loading,
+            song: Some(id.clone()),
+            duration: Duration::ZERO,
+        });
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            let res = tokio::task::spawn_blocking(move || playback::decode_file(&path)).await;
+            match res {
+                Ok(Ok(decoded)) => {
+                    let peaks = media::peaks(&decoded.samples, decoded.channels, 800);
+                    let dur = decoded.duration();
+                    if ctx.playback.load(id.clone(), Arc::new(decoded), true) {
+                        ctx.ev.send(Event::Peaks(id.clone(), peaks));
+                        ctx.ev.send(Event::PlaybackState {
+                            state: PlayState::Playing,
+                            song: Some(id),
+                            duration: dur,
+                        });
+                    }
+                }
+                Ok(Err(e)) => ctx.log(
+                    LogLevel::Error,
+                    "playback",
+                    format!("{name} reference: {e}"),
+                ),
+                Err(e) => ctx.log(LogLevel::Error, "playback", e.to_string()),
+            }
+        });
+    }
+
+    async fn send_history(ctx: &Arc<Ctx>) {
+        let Some(h) = ctx.runs.clone() else { return };
+        let Ok((list, errors)) = tokio::task::spawn_blocking(move || h.summaries()).await else {
+            return;
+        };
+        for e in errors {
+            ctx.log(LogLevel::Warn, "history", format!("skipped {e}"));
+        }
+        ctx.ev.send(Event::RunHistory(list));
+    }
+
+    async fn load_record(ctx: &Arc<Ctx>, id: RunId) -> Result<RunRecord, String> {
+        let h = ctx.runs.clone().ok_or("run history is off")?;
+        tokio::task::spawn_blocking(move || h.load(id))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+    }
+
+    async fn resume_interrupted(ctx: &Arc<Ctx>, id: RunId) {
+        let r = match Self::load_record(ctx, id).await {
+            Ok(r) => r,
+            Err(e) => {
+                ctx.log(LogLevel::Error, "history", format!("run {id}: {e}"));
+                return;
+            }
+        };
+        if r.status != crate::history::RecordStatus::Interrupted {
+            ctx.log(
+                LogLevel::Warn,
+                "history",
+                format!("`{}` wasn't interrupted; load it into Generate instead", r.name),
+            );
+            return;
+        }
+        if r.remaining() == Some(0) && r.in_flight() == 0 {
+            ctx.log(
+                LogLevel::Info,
+                "history",
+                format!("`{}` has no seeds left to run", r.name),
+            );
+            return;
+        }
+        let Some(spec) = r.resume_spec() else { return };
+        let origin = Origin {
+            regenerate_of: r.regenerate_of.clone(),
+            resumed_from: Some(id),
+        };
+        Self::start_run(ctx, spec, origin).await;
+        Self::send_history(ctx).await;
+    }
+
+    async fn send_projects(ctx: &Arc<Ctx>) {
+        let p = ctx.projects.clone();
+        if let Ok(list) = tokio::task::spawn_blocking(move || p.summaries()).await {
+            ctx.ev.send(Event::Projects(list));
+        }
     }
 
     async fn playback_ticker(ctx: Arc<Ctx>) {
@@ -1694,5 +2164,48 @@ mod tests {
             }
             .is_up()
         );
+    }
+
+    #[test]
+    fn output_lines_are_cleaned() {
+        assert_eq!(
+            clean_output_line("\u{1b}[1;31merror\u{1b}[0m: x"),
+            "error: x"
+        );
+        assert_eq!(clean_output_line("\u{1b}]0;title\u{7}hello"), "hello");
+        assert_eq!(clean_output_line("\u{1b}]0;title\u{1b}\\hello"), "hello");
+        assert_eq!(clean_output_line("10%\r50%\r100%\r"), "100%");
+        assert_eq!(
+            output_level("ggml_vulkan: Failed to allocate"),
+            LogLevel::Error
+        );
+        assert_eq!(output_level("WARNING: slow"), LogLevel::Warn);
+        assert_eq!(output_level("listening on 9123"), LogLevel::Info);
+    }
+
+    #[test]
+    fn log_tail_reads_whole_lines_and_follows_truncation() {
+        use std::io::Write;
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("gpu1.log");
+        let mut t = LogTail::default();
+        assert!(t.read(&p).is_empty(), "no file yet");
+        let mut f = std::fs::File::create(&p).unwrap();
+        write!(f, "one\ntw").unwrap();
+        assert_eq!(t.read(&p), vec!["one"]);
+        write!(f, "o\n\nthree").unwrap();
+        assert_eq!(t.read(&p), vec!["two"]);
+        assert_eq!(t.flush(), vec!["three"]);
+        // relaunch: the file starts over
+        std::fs::write(&p, "new\n").unwrap();
+        assert_eq!(t.read(&p), vec!["new"]);
+        // attaching mid-file skips the cut-off first line
+        let mut t = LogTail {
+            pos: 2,
+            skip_first: true,
+            ..Default::default()
+        };
+        std::fs::write(&p, "abcd\nefgh\n").unwrap();
+        assert_eq!(t.read(&p), vec!["efgh"]);
     }
 }

@@ -3,7 +3,9 @@
 
 use std::time::{Duration, SystemTime};
 
-use audiocpp_core::library::{Location, Song};
+use audiocpp_core::history::RecordStatus;
+use audiocpp_core::library::{Location, Song, SongId};
+use audiocpp_core::project::reference_play_id;
 use audiocpp_core::media::{ExportFormat, Rating};
 use audiocpp_core::params::Sampling;
 use audiocpp_core::playback::PlayState;
@@ -11,8 +13,9 @@ use audiocpp_core::run::{AbcSource, RunStatus};
 use audiocpp_core::scheduler::JobState;
 use audiocpp_core::service::{LogLevel, ServerState};
 use audiocpp_gui_core::{
-    AbcChoice, AppState, Blocker, Dialog, Focus, FolderFilter, LibraryFilter, ReviewKey, Tab,
-    UiAction, fmt_duration, job_label,
+    AbcChoice, AppState, Blocker, Dialog, DropKind, Focus, FolderFilter, FormLoad, LibraryFilter,
+    LogSource,
+    ReviewKey, Tab, UiAction, fmt_duration, job_label,
 };
 use egui::{Color32, RichText, Sense, TextEdit, Ui};
 use egui_phosphor::regular as ph;
@@ -32,6 +35,9 @@ pub fn draw(ui: &mut Ui, s: &AppState, out: &mut O) {
     egui::CentralPanel::default_margins().show(ui, |ui| match s.tab {
         Tab::Generate => generate(ui, s, out),
         Tab::Queue => queue(ui, s, out),
+        Tab::History => history(ui, s, out),
+        Tab::Projects => projects(ui, s, out),
+        Tab::Inputs => inputs(ui, s, out),
         Tab::Library => library(ui, s, out),
         Tab::Review => review(ui, s, out),
         Tab::Log => log(ui, s, out),
@@ -215,6 +221,18 @@ fn servers_bar(ui: &mut Ui, s: &AppState, out: &mut O) {
                 _ => {}
             }
             ui.label(text);
+            if !v.path_problems.is_empty() {
+                let n = v.path_problems.len();
+                ui.label(
+                    RichText::new(format!(
+                        "{} {n} model path{} missing on {name}",
+                        ph::WARNING,
+                        if n == 1 { "" } else { "s" }
+                    ))
+                    .color(ui.visuals().warn_fg_color),
+                )
+                .on_hover_text(v.path_problems.join("\n"));
+            }
             if v.info.launchable {
                 let can = v.state.can_launch();
                 let r = ui.add_enabled(can, icon_btn(ph::POWER, format!("Launch {name}")));
@@ -274,10 +292,21 @@ fn tabs(ui: &mut Ui, s: &AppState, out: &mut O) {
         for (t, icon, label) in [
             (Tab::Generate, ph::MAGIC_WAND, "Generate".to_string()),
             (Tab::Queue, ph::QUEUE, format!("Queue ({active})")),
+            (Tab::History, ph::CLOCK_COUNTER_CLOCKWISE, "History".to_string()),
+            (
+                Tab::Projects,
+                ph::FOLDERS,
+                format!("Projects ({})", s.projects.len()),
+            ),
+            (
+                Tab::Inputs,
+                ph::FILE_AUDIO,
+                format!("Inputs ({})", s.reference_rows().len()),
+            ),
             (
                 Tab::Library,
                 ph::BOOKS,
-                format!("Library ({})", s.library.len()),
+                format!("Audio Library ({})", s.library.len()),
             ),
             (
                 Tab::Review,
@@ -290,7 +319,76 @@ fn tabs(ui: &mut Ui, s: &AppState, out: &mut O) {
                 act(out, UiAction::SelectTab(t));
             }
         }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            now_playing(ui, s, out);
+        });
     });
+}
+
+fn tab_name(t: Tab) -> &'static str {
+    match t {
+        Tab::Generate => "Generate",
+        Tab::Queue => "Queue",
+        Tab::History => "History",
+        Tab::Projects => "Projects",
+        Tab::Inputs => "Inputs",
+        Tab::Library => "Audio Library",
+        Tab::Review => "Review",
+        Tab::Log => "Log",
+    }
+}
+
+/// Global transport at the right of the tab bar, so playback can be paused or resumed from
+/// any tab. Names the tab it was started from; clicking that name goes back there.
+/// Laid out right to left.
+fn now_playing(ui: &mut Ui, s: &AppState, out: &mut O) {
+    let p = &s.player;
+    let Some(state @ (PlayState::Playing | PlayState::Paused | PlayState::Loading)) = p.state
+    else {
+        return;
+    };
+    let Some(id) = &p.song else { return };
+    if ib_small(ui, ph::STOP, "Stop now playing").clicked() {
+        act(out, UiAction::StopPlayback);
+    }
+    let r = match state {
+        PlayState::Playing => ib_small(ui, ph::PAUSE, "Pause playback"),
+        _ => ui.add_enabled(
+            state == PlayState::Paused,
+            icon_btn(ph::PLAY, "Resume playback").small(),
+        ),
+    };
+    if r.clicked() {
+        act(out, UiAction::PauseResume);
+    }
+    if state == PlayState::Loading {
+        ui.spinner();
+    }
+    ui.monospace(format!(
+        "{} / {}",
+        fmt_duration(p.position),
+        fmt_duration(p.duration)
+    ));
+    let title = match s.library.get(id) {
+        Some(song) => song.title().to_string(),
+        None => s
+            .reference_rows()
+            .into_iter()
+            .find(|r| s.playing_reference(&r.project.name))
+            .map(|r| r.reference.original_name.clone())
+            .unwrap_or_else(|| id.0.clone()),
+    };
+    ui.add(egui::Label::new(&title).truncate())
+        .on_hover_text(&title);
+    if let Some(t) = p.tab {
+        let r = ui
+            .link(format!("{} {}", ph::SPEAKER_HIGH, tab_name(t)))
+            .on_hover_text(format!("Playing from the {} tab — click to go there", tab_name(t)));
+        if r.clicked() && s.tab != t {
+            act(out, UiAction::SelectTab(t));
+        }
+    }
+    ui.separator();
 }
 
 fn status_bar(ui: &mut Ui, s: &AppState, out: &mut O) {
@@ -305,7 +403,7 @@ fn status_bar(ui: &mut Ui, s: &AppState, out: &mut O) {
                 act(out, UiAction::DismissStatus);
             }
         }
-        if let Some(l) = s.log.iter().rev().find(|l| l.level == LogLevel::Error) {
+        if let Some(l) = s.last_error() {
             ui.separator();
             ui.label(
                 RichText::new(format!("last error: {}: {}", l.source, l.message))
@@ -318,7 +416,61 @@ fn status_bar(ui: &mut Ui, s: &AppState, out: &mut O) {
 // ---------------------------------------------------------------------------------------
 // Generate
 
+/// Files dropped onto the Generate panel (§5.2). While files hover, an overlay says
+/// what a drop would do.
+fn file_drop(ui: &mut Ui, s: &AppState, out: &mut O) {
+    let (hovered, dropped) = ui.input(|i| {
+        (
+            i.raw
+                .hovered_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect::<Vec<_>>(),
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect::<Vec<_>>(),
+        )
+    });
+    if !dropped.is_empty() {
+        match s.drop_target(&dropped) {
+            Ok((DropKind::Abc, p)) => out.push(Out::Effect(Effect::ReadAbcFile(p))),
+            Ok((DropKind::Audio, p)) => act(out, UiAction::TranscribeFile(p)),
+            Err(why) => act(out, UiAction::ShowStatus(why)),
+        }
+    }
+    if hovered.is_empty() {
+        return;
+    }
+    let (text, color) = match s.drop_target(&hovered) {
+        Ok((DropKind::Abc, _)) => (
+            "Drop to load this ABC file".to_string(),
+            ui.visuals().selection.bg_fill,
+        ),
+        Ok((DropKind::Audio, _)) => (
+            "Drop to transcribe this audio".to_string(),
+            ui.visuals().selection.bg_fill,
+        ),
+        Err(why) => (why, ui.visuals().warn_fg_color),
+    };
+    let rect = ui.max_rect();
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("file-drop"),
+    ));
+    painter.rect_filled(rect, 6.0, color.gamma_multiply(0.25));
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        egui::FontId::proportional(22.0),
+        ui.visuals().strong_text_color(),
+    );
+}
+
 fn generate(ui: &mut Ui, s: &AppState, out: &mut O) {
+    file_drop(ui, s, out);
     egui::ScrollArea::vertical()
         .id_salt("generate")
         .show(ui, |ui| {
@@ -332,6 +484,9 @@ fn generate(ui: &mut Ui, s: &AppState, out: &mut O) {
                 if s.focus == Some(Focus::Name) {
                     r.request_focus();
                     act(out, UiAction::FocusHandled);
+                }
+                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    act(out, UiAction::SubmitName);
                 }
                 if s.offers_project() && ib(ui, ph::FOLDER_OPEN, "Load project inputs").clicked() {
                     act(out, UiAction::LoadProjectInputs);
@@ -460,18 +615,22 @@ fn abc_section(ui: &mut Ui, s: &AppState, out: &mut O) {
                     Some(b) => load.on_disabled_hover_text(b),
                     None => load,
                 };
+                if s.focus == Some(Focus::AbcSection) && blocked.is_none() {
+                    load.request_focus();
+                    load.scroll_to_me(None);
+                    act(out, UiAction::FocusHandled);
+                }
                 if load.clicked() {
                     out.push(Out::Effect(Effect::PickAbcFile));
                 }
-                let tr = ui.add_enabled(
-                    blocked.is_none() && s.transcribe.project.is_none(),
-                    icon_btn(ph::WAVEFORM, "Transcribe audio…").strong(),
-                );
-                let tr = match blocked {
-                    Some(b) => tr.on_disabled_hover_text(b),
-                    None => tr,
-                };
-                if tr.clicked() {
+                // no name needed: picking a file asks for one if it's missing
+                if ui
+                    .add_enabled(
+                        s.transcribe.project.is_none(),
+                        icon_btn(ph::WAVEFORM, "Transcribe audio…").strong(),
+                    )
+                    .clicked()
+                {
                     out.push(Out::Effect(Effect::PickReferenceAudio));
                 }
                 let has_ref = s.project(&f.name).is_some_and(|p| p.has_reference);
@@ -515,6 +674,7 @@ fn abc_section(ui: &mut Ui, s: &AppState, out: &mut O) {
                 AbcSource::Manual => "typed or pasted".into(),
                 AbcSource::None => "none".into(),
             };
+            ui.weak("Or drop an .abc file or any audio file onto this panel.");
             if f.abc_choice == AbcChoice::None {
                 ui.weak("No ABC will be sent; YuE2 writes its own melody.");
             } else {
@@ -544,7 +704,7 @@ fn abc_section(ui: &mut Ui, s: &AppState, out: &mut O) {
                         if m.sections.is_empty() {
                             String::new()
                         } else {
-                            format!(" · sections: {}", m.sections.join(" → "))
+                            format!(" · sections: {}", m.sections.join(&format!(" {} ", ph::ARROW_RIGHT)))
                         }
                     ));
                     for w in &m.warnings {
@@ -666,7 +826,9 @@ fn queue(ui: &mut Ui, s: &AppState, out: &mut O) {
     ui.horizontal(|ui| {
         ui.heading("Queue");
         if s.runs.iter().any(|r| r.state.status == RunStatus::Done)
-            && ib(ui, ph::BROOM, "Clear finished runs").clicked()
+            && ib(ui, ph::BROOM, "Clear finished runs")
+                .on_hover_text("Removes them from the queue; they stay in History")
+                .clicked()
         {
             act(out, UiAction::ClearFinishedRuns);
         }
@@ -720,6 +882,19 @@ fn queue(ui: &mut Ui, s: &AppState, out: &mut O) {
                     }
                     if ib(ui, ph::PENCIL_SIMPLE, &format!("Edit {name}")).clicked() {
                         act(out, UiAction::ToggleRunEditor(id));
+                    }
+                    if ib(ui, ph::ARROW_SQUARE_IN, &format!("Load {name} into Generate"))
+                        .on_hover_text("Fill the Generate form with this run's settings, continuing after its last seed")
+                        .clicked()
+                    {
+                        act(out, UiAction::LoadIntoForm(FormLoad::Queue(id)));
+                    }
+                    if st.status != RunStatus::Active
+                        && ib(ui, ph::TRASH, &format!("Delete {name}"))
+                            .on_hover_text("Remove from the queue; unfinished jobs are cancelled")
+                            .clicked()
+                    {
+                        act(out, UiAction::RemoveRun(id));
                     }
                 });
                 if let Some(ed) = s.editors.get(&id).filter(|e| e.open) {
@@ -1060,13 +1235,13 @@ fn player(ui: &mut Ui, s: &AppState, out: &mut O, song: &Song) {
         };
         ui.monospace(format!("{} / {}", fmt_duration(pos), fmt_duration(dur)));
     });
-    waveform(ui, s, out, song);
+    waveform(ui, s, out, &song.id);
 }
 
 /// Waveform strip with a click-to-seek bar.
-fn waveform(ui: &mut Ui, s: &AppState, out: &mut O, song: &Song) {
+fn waveform(ui: &mut Ui, s: &AppState, out: &mut O, id: &SongId) {
     let p = &s.player;
-    let this = p.song.as_ref() == Some(&song.id);
+    let this = p.song.as_ref() == Some(id);
     let width = ui.available_width().max(100.0);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 56.0), Sense::click_and_drag());
     let dur = p.duration.as_secs_f32();
@@ -1081,7 +1256,7 @@ fn waveform(ui: &mut Ui, s: &AppState, out: &mut O, song: &Song) {
     let peaks = p
         .peaks
         .as_ref()
-        .filter(|(id, _)| id == &song.id)
+        .filter(|(p, _)| p == id)
         .map(|(_, v)| v.as_slice());
     let mid = rect.center().y;
     let color = ui.visuals().widgets.inactive.fg_stroke.color;
@@ -1119,7 +1294,7 @@ fn song_detail(ui: &mut Ui, s: &AppState, out: &mut O, song: &Song) {
     ui.heading(song.title());
     ui.weak(format!("{} · {}", song.stem, song.location.label()));
     if song.wav.is_none() {
-        warn_text(ui, "No WAV master: WAV export decodes the MP4.");
+        warn_text(ui, "No WAV master: WAV export decodes the MP3.");
     }
     if song.wav_ok == Some(false) {
         warn_text(ui, "WAV master does not match the recipe's wav_sha256.");
@@ -1169,9 +1344,8 @@ fn song_detail(ui: &mut Ui, s: &AppState, out: &mut O, song: &Song) {
             s.selected.len()
         };
         for (fmt, label) in [
-            (ExportFormat::Mp4, "MP4"),
-            (ExportFormat::Wav, "WAV"),
             (ExportFormat::Mp3, "MP3"),
+            (ExportFormat::Wav, "WAV"),
             (ExportFormat::Flac, "FLAC"),
         ] {
             if ib(ui, ph::EXPORT, &format!("Export {n} as {label}…")).clicked() {
@@ -1307,6 +1481,597 @@ fn metadata_editor(ui: &mut Ui, s: &AppState, out: &mut O, review: bool) {
 }
 
 // ---------------------------------------------------------------------------------------
+// Projects (§5.2.1)
+
+fn bytes(n: u64) -> String {
+    match n {
+        n if n >= 1 << 20 => format!("{:.1} MB", n as f64 / (1u64 << 20) as f64),
+        n if n >= 1 << 10 => format!("{:.0} KB", n as f64 / 1024.0),
+        n => format!("{n} B"),
+    }
+}
+
+/// `2026-09-23T21:40:02Z` → `2026-09-23 21:40`.
+fn short_time(t: &str) -> String {
+    t.get(..16).unwrap_or(t).replace('T', " ")
+}
+
+fn projects(ui: &mut Ui, s: &AppState, out: &mut O) {
+    ui.horizontal(|ui| {
+        let (_, v) = field(
+            ui,
+            "Search projects",
+            "p-search",
+            &s.projects_view.search,
+            180.0,
+        );
+        if let Some(v) = v {
+            act(out, UiAction::SetProjectSearch(v));
+        }
+        if ib(ui, ph::ARROWS_CLOCKWISE, "Refresh projects").clicked() {
+            act(out, UiAction::RefreshProjects);
+        }
+    });
+    ui.separator();
+    let list = s.filtered_projects();
+    egui::Panel::right("project-detail")
+        .resizable(true)
+        .default_size(440.0)
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("project-detail")
+                .show(ui, |ui| match s.current_project() {
+                    Some(p) => project_detail(ui, s, out, p),
+                    None => {
+                        ui.weak("Select a project.");
+                    }
+                });
+        });
+    ui.label(format!("{} projects", list.len()));
+    if s.projects.is_empty() {
+        ui.weak("No projects yet. A project is made when a run starts, or when you load an ABC file or transcribe audio in Generate.");
+    }
+    egui::ScrollArea::vertical()
+        .id_salt("projects")
+        .show(ui, |ui| {
+            for p in list {
+                let songs = s.project_songs(&p.name);
+                let mut text = format!("{}  ·  {songs} songs", p.name);
+                match &p.reference {
+                    Some(r) => text += &format!("  ·  {}", r.original_name),
+                    None => text += "  ·  no reference",
+                }
+                if p.error.is_some() {
+                    text += "  ·  unreadable project.ron";
+                }
+                let current = s.projects_view.current.as_deref() == Some(p.name.as_str());
+                let r = ui.selectable_label(current, text);
+                if r.clicked() {
+                    act(out, UiAction::SelectProject(p.name.clone()));
+                }
+                if r.double_clicked() {
+                    act(out, UiAction::OpenProject(p.name.clone()));
+                }
+            }
+        });
+}
+
+fn record_status(r: &audiocpp_core::history::RunSummary, s: &AppState) -> String {
+    // runs still in the queue: their live state beats the list's snapshot
+    match s.runs.iter().find(|q| q.state.id == r.id) {
+        Some(q) => format!(
+            "{} · {} done, {} failed",
+            RecordStatus::from(q.state.status).label(),
+            q.done,
+            q.failed
+        ),
+        None => format!("{} · {} done, {} failed", r.status.label(), r.done, r.failed),
+    }
+}
+
+fn history(ui: &mut Ui, s: &AppState, out: &mut O) {
+    let h = &s.history;
+    ui.horizontal(|ui| {
+        let (_, v) = field(ui, "Search runs", "h-search", &h.search, 180.0);
+        if let Some(v) = v {
+            act(out, UiAction::SetHistorySearch(v));
+        }
+        if ib(ui, ph::ARROWS_CLOCKWISE, "Refresh history").clicked() {
+            act(out, UiAction::RefreshHistory);
+        }
+        if let Some(root) = s.init.as_ref().map(|i| i.library_root.join(audiocpp_core::library::RUNS))
+            && ib(ui, ph::FOLDER_OPEN, "Open runs folder").clicked()
+        {
+            out.push(Out::Effect(Effect::OpenFolder(root)));
+        }
+    });
+    ui.separator();
+    let list = h.filtered();
+    egui::Panel::right("history-detail")
+        .resizable(true)
+        .default_size(520.0)
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("history-detail")
+                .show(ui, |ui| match (&h.selected, &h.record) {
+                    (None, _) => {
+                        ui.weak("Select a run.");
+                    }
+                    (Some(_), None) => {
+                        ui.spinner();
+                    }
+                    (Some(_), Some(Err(e))) => warn_text(ui, format!("Couldn't read the record: {e}")),
+                    (Some(_), Some(Ok(r))) => history_detail(ui, s, out, r),
+                });
+        });
+    ui.label(format!("{} runs", list.len()));
+    if h.runs.is_empty() {
+        ui.weak("No runs recorded yet. Every run started from Generate, Regenerate or Resume is kept here.");
+    }
+    egui::ScrollArea::vertical().id_salt("history").show(ui, |ui| {
+        for r in list {
+            let count = r.count.map(|c| c.to_string()).unwrap_or_else(|| "∞".into());
+            let regen = if r.regenerate_of.is_some() { " · regenerate" } else { "" };
+            let text = format!(
+                "{}  ·  {}  ·  {}  ·  seeds {}+{count}  ·  {}{regen}",
+                r.name,
+                fmt_time(&r.created_at),
+                record_status(r, s),
+                r.start_seed,
+                r.model_id,
+            );
+            if ui.selectable_label(h.selected == Some(r.id), text).clicked() {
+                act(out, UiAction::SelectHistoryRun(r.id));
+            }
+        }
+    });
+}
+
+/// `2026-09-25T10:02:11Z` → `2026-09-25 10:02` (UTC).
+fn fmt_time(rfc3339: &str) -> String {
+    rfc3339.get(..16).map(|t| t.replace('T', " ")).unwrap_or_else(|| rfc3339.to_string())
+}
+
+fn history_detail(ui: &mut Ui, s: &AppState, out: &mut O, r: &audiocpp_core::history::RunRecord) {
+    use audiocpp_core::history::SeedOutcome;
+    ui.heading(r.name.as_str());
+    let finished = r.finished_at.as_deref().map(|t| format!(" {} {}", ph::ARROW_RIGHT, fmt_time(t))).unwrap_or_default();
+    ui.weak(format!(
+        "{}{finished} UTC · {} · model {}",
+        fmt_time(&r.created_at),
+        r.status.label(),
+        r.model.id
+    ));
+    let count = r.count.map(|c| c.to_string()).unwrap_or_else(|| "until stopped".into());
+    ui.label(format!(
+        "Seeds from {} ({count}) · next seed {} · {} done, {} failed",
+        r.start_seed,
+        r.next_seed,
+        r.done(),
+        r.failed()
+    ));
+    if let Some(of) = &r.regenerate_of {
+        ui.label(format!("Regenerate of {of}"));
+    }
+    if let Some(from) = r.resumed_from {
+        ui.label(format!("Resumes run {from}"));
+    }
+    ui.horizontal_wrapped(|ui| {
+        if ib(ui, ph::ARROW_SQUARE_IN, "Load into Generate")
+            .on_hover_text("Latest params; the seed continues after this run's last one")
+            .clicked()
+        {
+            act(out, UiAction::LoadIntoForm(FormLoad::Record(None)));
+        }
+        if r.status == RecordStatus::Interrupted
+            && let Some(spec) = r.resume_spec().filter(|p| p.count != Some(0))
+            && ib(ui, ph::PLAY, "Resume run")
+                .on_hover_text(format!(
+                    "Queue the seeds it didn't finish, from seed {}",
+                    spec.start_seed
+                ))
+                .clicked()
+        {
+            act(out, UiAction::ResumeInterrupted(r.id));
+        }
+        if let Some(root) = s.init.as_ref().map(|i| i.library_root.join(audiocpp_core::library::RUNS))
+            && ib(ui, ph::FILE_TEXT, "Reveal record")
+                .on_hover_text(format!("{}.ron", r.id))
+                .clicked()
+        {
+            out.push(Out::Effect(Effect::OpenFolder(root)));
+        }
+    });
+    ui.separator();
+    ui.strong(format!("Revisions ({})", r.revisions.len()));
+    for v in r.revisions.iter().rev() {
+        egui::CollapsingHeader::new(format!(
+            "Revision {} · from seed {} · {}",
+            v.revision,
+            v.first_seed,
+            fmt_time(&v.at)
+        ))
+        .id_salt(("rev", v.revision))
+        .show(ui, |ui| {
+            if r.revisions.len() > 1
+                && ib_small(ui, ph::ARROW_SQUARE_IN, &format!("Load revision {}", v.revision)).clicked()
+            {
+                act(out, UiAction::LoadIntoForm(FormLoad::Record(Some(v.revision))));
+            }
+            let p = &v.params;
+            egui::Grid::new(("rev-grid", v.revision)).num_columns(2).show(ui, |ui| {
+                ui.weak("Style");
+                ui.label(&p.style);
+                ui.end_row();
+                ui.weak("ABC");
+                ui.label(match &v.abc_source {
+                    AbcSource::None => "none (YuE2 composes)".to_string(),
+                    AbcSource::File { file_name, .. } => format!("file {file_name}"),
+                    AbcSource::Transcribed(a) => format!("transcribed from {}", a.file_name),
+                    AbcSource::Manual => "typed".to_string(),
+                });
+                ui.end_row();
+                ui.weak("Guidance / steps");
+                ui.label(format!("{} / {}", p.guidance_scale, p.num_inference_steps));
+                ui.end_row();
+            });
+            if !p.lyrics.trim().is_empty() {
+                egui::CollapsingHeader::new("Lyrics")
+                    .id_salt(("lyrics", v.revision))
+                    .show(ui, |ui| {
+                        ui.label(&p.lyrics);
+                    });
+            }
+            if let Some(abc) = &p.abc {
+                egui::CollapsingHeader::new("ABC text")
+                    .id_salt(("abc", v.revision))
+                    .show(ui, |ui| {
+                        ui.monospace(abc);
+                    });
+            }
+        });
+    }
+    ui.separator();
+    ui.strong(format!("Seeds ({})", r.seeds.len()));
+    if r.seeds.is_empty() {
+        ui.weak("No seed finished.");
+    }
+    for e in &r.seeds {
+        ui.horizontal(|ui| {
+            ui.monospace(format!("{:>10}", e.seed));
+            ui.weak(format!("rev {}", e.revision));
+            match &e.outcome {
+                SeedOutcome::Song(id) => {
+                    let id = SongId(id.clone());
+                    match s.library.get(&id) {
+                        Some(song) => {
+                            if ui.link(song.title()).clicked() {
+                                act(out, UiAction::SelectTab(Tab::Library));
+                                act(out, UiAction::SelectSong(id));
+                            }
+                        }
+                        None => {
+                            ui.weak(format!("{} (no longer in the library)", id.0));
+                        }
+                    }
+                }
+                SeedOutcome::Failed(why) => {
+                    ui.colored_label(ui.visuals().error_fg_color, format!("failed: {why}"));
+                }
+                SeedOutcome::Cancelled => {
+                    ui.weak("cancelled");
+                }
+            }
+        });
+    }
+}
+
+fn project_detail(
+    ui: &mut Ui,
+    s: &AppState,
+    out: &mut O,
+    p: &audiocpp_core::project::ProjectSummary,
+) {
+    let name = &p.name;
+    ui.heading(name);
+    ui.weak(p.dir.display().to_string());
+    if let Some(e) = &p.error {
+        warn_text(ui, format!("project.ron: {e}"));
+    }
+    ui.horizontal_wrapped(|ui| {
+        if ib(ui, ph::MAGIC_WAND, "Load into Generate")
+            .on_hover_text("Fill the Generate form with this project's ABC, lyrics and style")
+            .clicked()
+        {
+            act(out, UiAction::OpenProject(name.clone()));
+        }
+        let songs = s.project_songs(name);
+        if ui
+            .add_enabled(
+                songs > 0,
+                icon_btn(ph::BOOKS, format!("Show {songs} songs")),
+            )
+            .clicked()
+        {
+            act(out, UiAction::ShowProjectSongs(name.clone()));
+        }
+        if ib(ui, ph::FOLDER_OPEN, "Open folder").clicked() {
+            out.push(Out::Effect(Effect::OpenFolder(p.dir.clone())));
+        }
+    });
+    ui.separator();
+    egui::Grid::new("project-facts")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label("Created");
+            ui.label(short_time(&p.created_at));
+            ui.end_row();
+            ui.label("Runs");
+            ui.label(p.runs.to_string());
+            ui.end_row();
+            ui.label("Reference");
+            match &p.reference {
+                Some(r) => {
+                    let size = p.reference_bytes.map(bytes).unwrap_or("missing".into());
+                    ui.label(format!("{} ({}, {size})", r.original_name, r.format));
+                }
+                None => {
+                    ui.weak("none");
+                }
+            }
+            ui.end_row();
+            ui.label("Transcription");
+            match &p.transcription {
+                Some(t) => ui.label(format!(
+                    "{} · {} · {:.1} s",
+                    t.model,
+                    short_time(&t.created_at),
+                    t.wall_ms as f64 / 1000.0
+                )),
+                None => ui.weak("none"),
+            };
+            ui.end_row();
+            ui.label("ABC");
+            match &p.abc {
+                Some(a) => ui.label(match &a.source {
+                    audiocpp_core::project::AbcFileSource::Transcribed => {
+                        format!("{} (transcribed)", a.file)
+                    }
+                    audiocpp_core::project::AbcFileSource::File(f) => {
+                        format!("{} (from {f})", a.file)
+                    }
+                    audiocpp_core::project::AbcFileSource::Manual => {
+                        format!("{} (typed)", a.file)
+                    }
+                }),
+                None => ui.weak("none"),
+            };
+            ui.end_row();
+        });
+    ui.separator();
+    let busy = s.project_busy(name);
+    ui.horizontal(|ui| {
+        let (r, v) = field(ui, "Rename to", "p-rename", &s.projects_view.rename, 200.0);
+        if let Some(v) = v {
+            act(out, UiAction::SetProjectRename(v));
+        }
+        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let changed = s.projects_view.rename.trim() != name;
+        let b = ui.add_enabled(
+            busy.is_none() && changed,
+            icon_btn(ph::PENCIL_SIMPLE, "Rename project"),
+        );
+        let b = match busy {
+            Some(why) => b.on_disabled_hover_text(why),
+            None => b,
+        };
+        if (b.clicked() || enter) && busy.is_none() && changed {
+            act(out, UiAction::RenameProject);
+        }
+    });
+    let songs = s.project_songs(name);
+    if songs > 0 && s.projects_view.rename.trim() != name {
+        warn_text(
+            ui,
+            format!(
+                "Its {songs} songs keep the run name “{name}”, so they won't be linked to the renamed project."
+            ),
+        );
+    }
+    let d = ui.add_enabled(busy.is_none(), icon_btn(ph::TRASH, "Delete project"));
+    let d = match busy {
+        Some(why) => d.on_disabled_hover_text(why),
+        None => d,
+    };
+    if d.clicked() {
+        act(out, UiAction::DeleteProject(name.clone()));
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Inputs: reference audio across projects (§5.2)
+
+fn inputs(ui: &mut Ui, s: &AppState, out: &mut O) {
+    let rows = s.reference_rows();
+    ui.horizontal(|ui| {
+        ui.label(format!("{} reference files", rows.len()));
+        if ib(ui, ph::ARROWS_CLOCKWISE, "Refresh inputs").clicked() {
+            act(out, UiAction::RefreshProjects);
+        }
+        ui.separator();
+        match s.form.name_result() {
+            Ok(n) => ui.weak(format!(
+                "“Use” loads the audio into the Generate project “{n}”."
+            )),
+            Err(_) => ui.weak("Enter a name in Generate to use a reference there."),
+        };
+    });
+    if let Some(p) = &s.transcribe.project {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(format!("Transcribing “{p}”…"));
+        });
+    }
+    ui.separator();
+    if rows.is_empty() {
+        ui.weak("No reference audio yet. Transcribe from audio in Generate, or drop an audio file onto it.");
+        return;
+    }
+    if let Some(row) = rows.iter().find(|r| s.playing_reference(&r.project.name)) {
+        reference_player(ui, s, out, row);
+        ui.separator();
+    }
+    let busy = s.transcribe.project.is_some();
+    egui::ScrollArea::vertical()
+        .id_salt("inputs")
+        .show(ui, |ui| {
+            egui::Grid::new("references")
+                .num_columns(6)
+                .striped(true)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    for h in ["", "File", "Format", "Projects", "Transcription", ""] {
+                        ui.strong(h);
+                    }
+                    ui.end_row();
+                    for row in &rows {
+                        reference_row(ui, s, out, row, busy);
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
+/// Transport and waveform for the reference audio the player holds.
+fn reference_player(
+    ui: &mut Ui,
+    s: &AppState,
+    out: &mut O,
+    row: &audiocpp_gui_core::ReferenceRow<'_>,
+) {
+    let p = &s.player;
+    let src = &row.project.name;
+    let file = &row.reference.original_name;
+    ui.horizontal(|ui| {
+        let playing = p.state == Some(PlayState::Playing);
+        let (icon, what) = if playing {
+            (ph::PAUSE, "Pause reference")
+        } else {
+            (ph::PLAY, "Play reference")
+        };
+        if ib(ui, icon, what).clicked() {
+            act(out, UiAction::PlayReference(src.clone()));
+        }
+        if ib(ui, ph::STOP, "Stop reference").clicked() {
+            act(out, UiAction::StopPlayback);
+        }
+        if p.state == Some(PlayState::Loading) {
+            ui.spinner();
+        }
+        ui.monospace(format!(
+            "{} / {}",
+            fmt_duration(p.position),
+            fmt_duration(p.duration)
+        ));
+        ui.label(file);
+    });
+    waveform(ui, s, out, &reference_play_id(src));
+}
+
+fn reference_row(
+    ui: &mut Ui,
+    s: &AppState,
+    out: &mut O,
+    row: &audiocpp_gui_core::ReferenceRow<'_>,
+    busy: bool,
+) {
+    let r = row.reference;
+    let src = &row.project.name;
+    let file = &r.original_name;
+    let playing = s.playing_reference(src)
+        && matches!(
+            s.player.state,
+            Some(PlayState::Playing | PlayState::Loading)
+        );
+    ui.horizontal(|ui| {
+        let (icon, what) = if playing {
+            (ph::PAUSE, "Pause")
+        } else {
+            (ph::PLAY, "Play")
+        };
+        if ib_small(ui, icon, &format!("{what} {file}")).clicked() {
+            act(out, UiAction::PlayReference(src.clone()));
+        }
+        if s.playing_reference(src) {
+            if ib_small(ui, ph::STOP, &format!("Stop {file}")).clicked() {
+                act(out, UiAction::StopPlayback);
+            }
+        }
+    });
+    ui.label(file).on_hover_text(format!(
+        "SHA-256 {}\nstored as {}/{}",
+        r.sha256,
+        row.project.dir.display(),
+        r.file
+    ));
+    let size = row
+        .project
+        .reference_bytes
+        .map(bytes)
+        .unwrap_or("missing".into());
+    let conv = match &r.conversion {
+        Some(_) => "converted to WAV",
+        None => "uploaded as is",
+    };
+    ui.label(format!("{} · {size}", r.format))
+        .on_hover_text(r.conversion.clone().unwrap_or(conv.into()));
+    ui.horizontal(|ui| {
+        for p in &row.projects {
+            if ui.link(&p.name).on_hover_text("Show in Projects").clicked() {
+                act(out, UiAction::SelectProject(p.name.clone()));
+                act(out, UiAction::SelectTab(Tab::Projects));
+            }
+        }
+    });
+    match row.transcribed.and_then(|p| p.transcription.as_ref()) {
+        Some(t) => ui.label(format!("{} · {}", t.model, short_time(&t.created_at))),
+        None => ui.weak("not transcribed"),
+    };
+    ui.horizontal(|ui| {
+        let blocked = s.inputs_blocker();
+        let u = ui.add_enabled(
+            blocked.is_none() && !busy,
+            icon_btn(ph::MUSIC_NOTES, format!("Use {file}")).small(),
+        );
+        let u = match (blocked, busy) {
+            (Some(b), _) => u.on_disabled_hover_text(b),
+            (_, true) => u.on_disabled_hover_text("A transcription is already running."),
+            _ => u.on_hover_text(if row.transcribed.is_some() {
+                "Load into the Generate project; the existing transcription is reused"
+            } else {
+                "Load into the Generate project and transcribe it"
+            }),
+        };
+        if u.clicked() {
+            act(out, UiAction::UseReference(src.clone()));
+        }
+        let t = ui.add_enabled(
+            !busy,
+            icon_btn(ph::ARROWS_CLOCKWISE, format!("Re-transcribe {file}")).small(),
+        );
+        let t = if busy {
+            t.on_disabled_hover_text("A transcription is already running.")
+        } else {
+            t.on_hover_text(format!("Run SheetSage2 again for project “{src}”"))
+        };
+        if t.clicked() {
+            act(out, UiAction::RetranscribeProject(src.clone()));
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------------------
 // Review mode (§7.3)
 
 fn review(ui: &mut Ui, s: &AppState, out: &mut O) {
@@ -1324,7 +2089,11 @@ fn review(ui: &mut Ui, s: &AppState, out: &mut O) {
             act(out, UiAction::EnterReview);
         }
     });
-    ui.weak("Space play/pause · ←/→ seek 5 s (Shift 30 s) · 1/2/3 rate good/neutral/bad and next · N/P next/previous · T tag · R rename");
+    ui.weak(format!(
+        "Space play/pause · {}/{} seek 5 s (Shift 30 s) · 1/2/3 rate good/neutral/bad and next · N/P next/previous · T tag · R rename · L lyrics",
+        ph::ARROW_SQUARE_LEFT,
+        ph::ARROW_SQUARE_RIGHT
+    ));
     ui.separator();
     let song = s.review_song().and_then(|id| s.song(id));
     match song {
@@ -1350,9 +2119,19 @@ fn review(ui: &mut Ui, s: &AppState, out: &mut O) {
                         act(out, UiAction::ReviewKey(ReviewKey::Rate(r)));
                     }
                 }
+                if ui
+                    .add_enabled(song.lyrics().is_some(), icon_btn(ph::TEXT_ALIGN_LEFT, "Lyrics"))
+                    .on_disabled_hover_text("No lyrics in this song's recipe")
+                    .clicked()
+                {
+                    act(out, UiAction::ReviewKey(ReviewKey::Lyrics));
+                }
             });
             ui.separator();
             metadata_editor(ui, s, out, true);
+            if s.review.lyrics {
+                lyrics_popup(ui.ctx(), s, out, song);
+            }
         }
         None => {
             ui.label(if total == 0 {
@@ -1364,20 +2143,128 @@ fn review(ui: &mut Ui, s: &AppState, out: &mut O) {
     }
 }
 
+/// The review song's lyrics in a scrolling popup. The review keys keep working behind it,
+/// so it follows the song through Rate/Next/Prev until closed.
+fn lyrics_popup(ctx: &egui::Context, s: &AppState, out: &mut O, song: &Song) {
+    let resp = egui::Modal::new(egui::Id::new("lyrics")).show(ctx, |ui| {
+        ui.set_width(520.0_f32.min(ctx.content_rect().width() - 48.0));
+        ui.heading(song.title());
+        let this = s.player.song.as_ref() == Some(&song.id);
+        if this {
+            ui.weak(format!(
+                "{} / {}",
+                fmt_duration(s.player.position),
+                fmt_duration(s.player.duration)
+            ));
+        }
+        ui.separator();
+        match song.lyrics() {
+            Some(lyrics) => {
+                egui::ScrollArea::vertical()
+                    .id_salt(("lyrics-scroll", &song.id.0))
+                    .max_height(ctx.content_rect().height() * 0.6)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for line in lyrics.lines() {
+                            let t = line.trim();
+                            // section markers such as `[Verse]` / `[Chorus]`
+                            if t.starts_with('[') && t.ends_with(']') {
+                                ui.add_space(4.0);
+                                ui.strong(t);
+                            } else {
+                                ui.label(line);
+                            }
+                        }
+                    });
+            }
+            None => {
+                ui.weak("This song's recipe has no lyrics.");
+            }
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ib(ui, ph::X, "Close lyrics").clicked() {
+                act(out, UiAction::CloseLyrics);
+            }
+            ui.weak("Space play/pause · 1/2/3 rate and next · N/P next/previous · L or Esc close");
+        });
+    });
+    if resp.should_close()
+        && !out
+            .iter()
+            .any(|o| matches!(o, Out::Ui(UiAction::CloseLyrics | UiAction::ReviewKey(ReviewKey::Lyrics))))
+    {
+        act(out, UiAction::CloseLyrics);
+    }
+}
+
 // ---------------------------------------------------------------------------------------
 // Log
 
 fn log(ui: &mut Ui, s: &AppState, out: &mut O) {
+    let f = &s.log_filter;
     ui.horizontal(|ui| {
         ui.heading("Log");
-        if ib(ui, ph::TRASH, "Clear log").clicked() {
+        if icon_tab(ui, f.shows_all(), ph::LIST, "All").clicked() {
+            act(out, UiAction::ShowAllLogs);
+        }
+        if icon_tab(ui, f.shows(LogSource::App), ph::APP_WINDOW, "App").clicked() {
+            act(out, UiAction::ToggleLogSource(LogSource::App));
+        }
+        for v in &s.servers {
+            let errors = v.log.iter().filter(|l| l.level == LogLevel::Error).count();
+            let label = match errors {
+                0 => v.info.name.clone(),
+                1 => format!("{} (1 error)", v.info.name),
+                n => format!("{} ({n} errors)", v.info.name),
+            };
+            let src = LogSource::Server(v.info.id);
+            if icon_tab(ui, f.shows(src), ph::TERMINAL_WINDOW, &label).clicked() {
+                act(out, UiAction::ToggleLogSource(src));
+            }
+        }
+        let what = if f.shows_all() {
+            "Clear log"
+        } else {
+            "Clear the shown sources"
+        };
+        if ib(ui, ph::TRASH, what).clicked() {
             act(out, UiAction::ClearLog);
         }
     });
+    let shown: Vec<_> = s
+        .servers
+        .iter()
+        .filter(|v| f.shows(LogSource::Server(v.info.id)))
+        .collect();
+    for v in &shown {
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "{} on port {}: {}",
+                v.info.name,
+                v.info.port,
+                v.state.label()
+            ));
+            if let Some(file) = &v.info.log_file {
+                ui.separator();
+                ui.label(RichText::new(format!("full output: {}", file.display())).weak());
+                if ib_small(ui, ph::COPY, "Copy path").clicked() {
+                    ui.ctx().copy_text(file.display().to_string());
+                }
+            }
+        });
+    }
+    // one server on its own needs no source column
+    let single = shown.len() == 1 && !f.shows(LogSource::App);
     let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 2.0;
-    let lines: Vec<_> = s.log.iter().collect();
+    let lines = s.log_lines();
+    if shown.is_empty() && !f.shows(LogSource::App) {
+        ui.label(RichText::new("No sources selected.").weak());
+    } else if lines.is_empty() {
+        ui.label(RichText::new("Nothing logged yet.").weak());
+    }
     egui::ScrollArea::vertical()
-        .id_salt("log")
+        .id_salt(("log", &f.hidden))
         .stick_to_bottom(true)
         .show_rows(ui, row_h, lines.len(), |ui, range| {
             for l in &lines[range] {
@@ -1392,18 +2279,27 @@ fn log(ui: &mut Ui, s: &AppState, out: &mut O) {
                     .unwrap_or_default()
                     .as_secs()
                     % 86400;
-                ui.label(
-                    RichText::new(format!(
-                        "{:02}:{:02}:{:02} {:>10}  {}",
+                // `│` marks what the server printed, `:` the app's own messages
+                let mark = if l.output { '│' } else { ':' };
+                let text = if single {
+                    format!(
+                        "{:02}:{:02}:{:02} {mark} {}",
+                        t / 3600,
+                        (t / 60) % 60,
+                        t % 60,
+                        l.message
+                    )
+                } else {
+                    format!(
+                        "{:02}:{:02}:{:02} {:>10}{mark} {}",
                         t / 3600,
                         (t / 60) % 60,
                         t % 60,
                         l.source,
                         l.message
-                    ))
-                    .monospace()
-                    .color(color),
-                );
+                    )
+                };
+                ui.label(RichText::new(text).monospace().color(color));
             }
         });
 }
@@ -1439,6 +2335,57 @@ fn dialogs(ctx: &egui::Context, s: &AppState, out: &mut O) {
                     audio.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
                 ));
                 buttons(ui, out, "Replace reference", "Keep the old one");
+            }
+            Dialog::NameProject { audio, name } => {
+                ui.heading("Name the project");
+                ui.label(format!(
+                    "Transcribing {} needs a project to save into (inputs/<name>/).",
+                    audio.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                ));
+                let (r, v) = field(ui, "Project name", "dialog-name", name, 300.0);
+                if let Some(v) = v {
+                    act(out, UiAction::SetDialogName(v));
+                }
+                if !r.has_focus() && !r.lost_focus() {
+                    r.request_focus();
+                }
+                let valid = audiocpp_core::run::RunName::parse(name);
+                if let Err(e) = &valid {
+                    warn_text(ui, e.to_string());
+                } else if s.project(name.trim()).is_some() {
+                    ui.weak("A project with this name exists; the audio is added to it.");
+                }
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.horizontal(|ui| {
+                    let ok = ui.add_enabled(valid.is_ok(), icon_btn(ph::CHECK, "Transcribe"));
+                    if ok.clicked() || (enter && valid.is_ok()) {
+                        act(out, UiAction::ConfirmDialog);
+                    }
+                    if ib(ui, ph::X, "Cancel").clicked() {
+                        act(out, UiAction::CancelDialog);
+                    }
+                });
+            }
+            Dialog::ReplaceForm(_) => {
+                ui.heading("Replace the Generate form?");
+                ui.label(format!(
+                    "Generate already has “{}” filled in. Loading this run replaces its name, ABC, lyrics, style and parameters.",
+                    s.form.name.trim()
+                ));
+                buttons(ui, out, "Replace form", "Keep the form");
+            }
+            Dialog::DeleteProject(name) => {
+                ui.heading("Delete project?");
+                let songs = s.project_songs(name);
+                ui.label(format!(
+                    "Move the project folder inputs/{name}/ (reference, transcription, ABC, lyrics and style) to the system trash?"
+                ));
+                if songs > 0 {
+                    ui.label(format!(
+                        "Its {songs} song(s) stay in the library; their recipes still hold the exact inputs."
+                    ));
+                }
+                buttons(ui, out, "Move project to trash", "Keep");
             }
             Dialog::ConfirmDelete(ids) => {
                 ui.heading("Delete songs?");
@@ -1502,6 +2449,7 @@ fn keyboard(ctx: &egui::Context, s: &AppState, out: &mut O) {
                 (egui::Key::P, ReviewKey::Prev),
                 (egui::Key::T, ReviewKey::Tag),
                 (egui::Key::R, ReviewKey::Rename),
+                (egui::Key::L, ReviewKey::Lyrics),
             ] {
                 if i.key_pressed(k) {
                     keys.push(rk);

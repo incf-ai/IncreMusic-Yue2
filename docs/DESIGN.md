@@ -11,7 +11,7 @@ organizing the results. It:
 2. Can turn a reference track into ABC notation with **SheetSage2**.
 3. Generates a **batch** of songs with **YuE2** from one set of parameters and a series of
    seeds, spreading the jobs across all available servers.
-4. Encodes each result to **MP4 (AAC)** and embeds the full generation recipe in it so the
+4. Encodes each result to **MP3 (LAME)** and embeds the full generation recipe in it so the
    song can be reproduced. Each file goes into `unreviewed/`.
 5. Lets you play, seek, name, tag, rate, and export songs. Reviewed songs move to
    `reviewed/{good,neutral,bad}/`.
@@ -23,7 +23,7 @@ organizing the results. It:
 **Goals**
 
 - Produce many generations without supervision, using every GPU available.
-- Make every generated file reproducible on its own: the MP4 carries everything needed
+- Make every generated file reproducible on its own: the MP3 carries everything needed
   to regenerate it.
 - Make review fast with the keyboard (play, rate, next).
 - **Never block the UI** on a long-running operation (section 2.3.1). The window keeps
@@ -243,9 +243,9 @@ depend on `egui`. Everything above `core` talks to it only through a `CoreHandle
 | `transcribe` | Reference audio → convert to WAV → upload → SheetSage2 → `AbcScore`. Reuses an existing transcription when the audio hash matches |
 | `run` | `RunSpec`/`RunState`: name validation, seed cursor, param revisions, handing out jobs |
 | `scheduler` | Work queue: one worker per healthy server, retries, cancellation (section 5) |
-| `media` | WAV → MP4/AAC via `ffmpeg`, reads and writes MP4 metadata, computes waveform peaks (section 6) |
+| `media` | WAV → MP3 via `ffmpeg` (libmp3lame), reads and writes ID3v2.4 metadata, computes waveform peaks (section 6) |
 | `library` | Folder layout, scanning, rename/tag/rate/move, export (section 7) |
-| `playback` | Decodes MP4 with `symphonia` into a sample source with seek. The GUI owns the output device |
+| `playback` | Decodes MP3 with `symphonia` into a sample source with seek. The GUI owns the output device |
 | `service` | `CoreHandle`: async command handler and event broadcaster that ties it all together |
 
 ### 2.3 Core ↔ GUI boundary
@@ -255,7 +255,7 @@ pub enum Command {
     LaunchServer(ServerId), StopServer(ServerId), RefreshServers,
     Transcribe { audio: PathBuf },
     StartRun(RunSpec), EditRun(RunId, RunEdit),   // RunEdit: params / count / next_seed
-    PauseRun(RunId), ResumeRun(RunId), StopRun(RunId), CancelJob(JobId),
+    PauseRun(RunId), ResumeRun(RunId), StopRun(RunId), RemoveRun(RunId), CancelJob(JobId),
     Library(LibraryCommand),          // rename, tag, rate, move, export, rescan
     Play(SongId), Seek(Duration), Pause, Stop,
 }
@@ -370,7 +370,7 @@ Config(
 
     library: Library(
         root: "~/Music/audiocpp",               // unreviewed/, reviewed/{good,neutral,bad}/
-        encoder: Aac(bitrate_kbps: 256),        // or: Alac
+        encoder: Vbr(quality: 0),               // LAME -V0..9; or: Cbr(bitrate_kbps: 320)
         // file names are always "<run name>-<seed>" (section 5.1.1)
     ),
 
@@ -496,7 +496,7 @@ so that the recorded PID belongs to the server itself.
 ### 5.1 Parameters
 
 ```rust
-pub struct GenerationParams {          // serde, RON presets, embedded in MP4
+pub struct GenerationParams {          // serde, RON presets, embedded in MP3
     pub lyrics: String,
     pub style: String,
     pub abc: Option<String>,           // None → YuE2 generates its own ABC (supported, see 5.2)
@@ -537,11 +537,12 @@ pub struct RunState {                  // owned by the scheduler
 
 - **Every run must be given a name.** *Start run* stays disabled until the name field is
   valid, and the reason is shown next to the field.
-- The name field is **cleared after each run starts**. Presets do not store a name. Every
-  new run therefore needs a name typed on purpose, even if everything else is reused.
-- Each song is a **folder named `<name>-<seed>`** that holds `<name>-<seed>.mp4` and its
-  lossless master `<name>-<seed>.wav`. For example, `sunny-hook-1233/sunny-hook-1233.mp4`.
-  The folder, both files, and the MP4 title (`©nam`) all share this one stem (section 7.1).
+- The name field is **kept after each run starts**, and the starting seed **advances by the
+  run's count** (left as is for an *until stopped* run), so starting again continues the
+  same name without colliding. Presets do not store a name.
+- Each song is a **folder named `<name>-<seed>`** that holds `<name>-<seed>.mp3` and its
+  lossless master `<name>-<seed>.wav`. For example, `sunny-hook-1233/sunny-hook-1233.mp3`.
+  The folder, both files, and the MP3 title (`TIT2`) all share this one stem (section 7.1).
 - `RunName` validation, the same on every OS so files stay portable:
   - Trimmed and not empty. At most 100 characters.
   - None of `/ \ : * ? " < > |` or control characters. Must not end in `.` or a space.
@@ -559,7 +560,7 @@ pub struct RunState {                  // owned by the scheduler
 #### 5.1.2 Seeds and editing a running job
 
 - The user enters the **starting seed**, and the scheduler hands out `start_seed`,
-  `start_seed + 1`, … in order. A 🎲 button next to the field fills in a random seed for
+  `start_seed + 1`, … in order. The field starts at `0` when the window opens. A 🎲 button next to the field fills in a random seed for
   convenience, but the value is always visible and editable before the run starts. Seeds
   are `u32` (0 … 4 294 967 295). Incrementing past the maximum stops the run. The server
   accepts more than this: the check in its binary is `Yue2 seed must be in [0, 2^63)`, and
@@ -668,11 +669,14 @@ the project `sunny-hook` produces the songs `sunny-hook-1233/`, `sunny-hook-1234
     └── style.txt                    # style the run used
 ```
 
-- **Name first.** The **Name** field moves to the top of the Generate panel. Load .abc and
-  Transcribe stay disabled until it holds a valid `RunName`, because inputs need a project
-  to be saved into. The tooltip says: *"Enter a name first. Inputs are saved to
-  inputs/<name>/."* The name is still required for every run and still cleared after each
-  run starts (section 5.1.1).
+- **Name first.** The **Name** field moves to the top of the Generate panel. Load .abc
+  stays disabled until it holds a valid `RunName`, because inputs need a project to be
+  saved into. The tooltip says: *"Enter a name first. Inputs are saved to
+  inputs/<name>/."* **Transcribe audio…** (and dropping an audio file) works without a
+  name: once a file is picked, a cancellable **Name the project** dialog suggests the
+  file's base name (characters a `RunName` can't hold become `_`). Confirming fills the
+  Name field and transcribes as usual. The name is still required for every run and
+  kept after each run starts (section 5.1.1).
 - **Existing projects:** typing a name that matches an existing project offers **"Load
   project inputs"**. This fills the ABC, lyrics, and style editors from the project. The
   seed collision check (section 5.1.1) then offers to continue from the next free seed.
@@ -759,6 +763,9 @@ Project(
   - **Stop run** stops handing out new seeds, and drops the run's queued retries. Jobs
     already running finish and are **kept**, because their GPU time has already been
     spent. To throw them away too, the user cancels them individually.
+  - **Delete run** removes a paused, stopping or finished run from the queue (an active
+    run must be paused or stopped first). Its queued retries are dropped and its running
+    jobs are cancelled as above; songs already saved stay in the library.
 - **Timeouts:** When `request_timeout_secs` runs out, the client closes the request, but
   the server probably keeps working (section 1.4). The job is requeued with the same seed,
   so another server can pick it up. The server that timed out goes to
@@ -770,41 +777,43 @@ Project(
 
 ---
 
-## 6. Output files: MP4 + reproducibility metadata
+## 6. Output files: MP3 + reproducibility metadata
 
 ### 6.1 Encoding
 
 - The server's WAV (48 kHz s16 stereo) is decoded straight into the song's staging folder
   and **kept as the lossless master**, `<name>-<seed>.wav`, byte for byte as the server
   sent it. At about 11 MB per minute, a 4–6 min song takes about 45–65 MB.
-- The MP4 is encoded from the master:
-  `ffmpeg -i <stem>.wav -c:a aac -b:a 256k -movflags +faststart <stem>.mp4`. The `Alac`
-  setting encodes losslessly instead. The MP4 is the file for listening and sharing, and
-  it carries all the metadata.
+- The MP3 is encoded from the master with LAME:
+  `ffmpeg -i <stem>.wav -map_metadata -1 -c:a libmp3lame -q:a 0 <stem>.mp3`. The default
+  is `Vbr(quality: 0)` (LAME `-V0`, about 245 kbps). `Cbr(bitrate_kbps: N)` (32–320) gives
+  a constant bitrate instead. ffmpeg writes the Xing/LAME header, so players get the exact
+  length and gapless trim. The MP3 is the file for listening and sharing, and it carries
+  all the metadata.
 - `ffmpeg` is an external dependency. It is found on `PATH` or through config, and its
   presence is checked at startup.
-- The whole song is staged in `unreviewed/<stem>.part/`. The WAV, the MP4, and its
+- The whole song is staged in `unreviewed/<stem>.part/`. The WAV, the MP3, and its
   metadata are all written there, and then the **folder is atomically renamed** to
   `unreviewed/<stem>/`. A half-finished song never shows up in the library. Leftover
   `*.part` folders are removed at startup.
-- The extension is `.mp4`, as specified. `.m4a` is a config option for players that
-  prefer it.
+- The extension is always `.mp3`.
 
 ### 6.2 Metadata
 
-Written with the `mp4ameta` crate, so tags can be edited later in place without
-re-encoding.
+An ID3v2.4 tag written with the `id3` crate, so tags can be edited later in place without
+re-encoding. Only the tag at the front of the file is rewritten; the audio frames are
+untouched. The song length comes from the stream's Xing/LAME header.
 
-| Atom | Content |
+| Frame | Content |
 |---|---|
-| `©nam` (title) | Defaults to `"<run name>-<seed>"`, which is the same as the file name. Can be edited in review |
-| `©cmt` (comment) | User notes |
-| `©too` (encoder) | `audiocpp-ui {version}` |
-| `----:org.audiocpp-ui:recipe` | **Reproducibility record** as JSON (below) |
-| `----:org.audiocpp-ui:tags` | JSON array of user tags. Also mirrored to `keyw` or `©gen` for other players |
-| `----:org.audiocpp-ui:rating` | `"good"`, `"neutral"`, or `"bad"` (also implied by folder; the atom wins if the file is moved by hand) |
+| `TIT2` (title) | Defaults to `"<run name>-<seed>"`, which is the same as the file name. Can be edited in review |
+| `COMM` (comment, empty description) | User notes |
+| `TSSE` (encoder) | `audiocpp-ui {version}` |
+| `TXXX:org.audiocpp-ui:recipe` | **Reproducibility record** as JSON (below) |
+| `TXXX:org.audiocpp-ui:tags` | JSON array of user tags |
+| `TXXX:org.audiocpp-ui:rating` | `"good"`, `"neutral"`, or `"bad"` (also implied by folder; the frame wins if the file is moved by hand) |
 
-**Recipe record** (the JSON embedded in the MP4):
+**Recipe record** (the JSON embedded in the MP3):
 
 ```jsonc
 {
@@ -826,7 +835,7 @@ re-encoding.
                 // or {"File":{…}}, "Manual", "None"; the ABC text itself is in `request`
   "timing": { "wall_ms": 155962, "audio_duration_ms": 278439, "rtf": 0.56013 }, // verbatim from server
   "output": { "sample_rate": 48000, "channels": 2,
-              "wav_sha256": "…", "encoder": "aac 256k" }
+              "wav_sha256": "…", "encoder": "mp3 V0" }
 }
 ```
 
@@ -849,10 +858,10 @@ the original.
 <library_root>/
 ├── unreviewed/
 │   ├── sunny-hook-1233/
-│   │   ├── sunny-hook-1233.mp4    # AAC + all metadata (title, tags, rating, recipe)
+│   │   ├── sunny-hook-1233.mp3    # MP3 + all metadata (title, tags, rating, recipe)
 │   │   └── sunny-hook-1233.wav    # lossless master, exactly as the server returned it
 │   └── sunny-hook-1234/
-│       ├── sunny-hook-1234.mp4
+│       ├── sunny-hook-1234.mp3
 │       └── sunny-hook-1234.wav
 ├── reviewed/
 │   ├── good/           # song folders, same shape as above
@@ -865,14 +874,14 @@ the original.
 ```
 
 - **The song folder is the unit.** Every move, rename, rating, and delete acts on the whole
-  folder, so the MP4 and its master can't drift apart.
-- The **MP4 is the source of truth** for metadata. The WAV holds only audio, and it is
+  folder, so the MP3 and its master can't drift apart.
+- The **MP3 is the source of truth** for metadata. The WAV holds only audio, and it is
   checked against `output.wav_sha256` in the recipe. `.cache/index.ron` only makes startup
   faster. It is rebuilt from a scan whenever an entry's mtime/size differs or the file is
   missing.
-- **Scanning:** a folder that holds an `.mp4` is a song. The WAV is optional: if it is
+- **Scanning:** a folder that holds an `.mp3` is a song. The WAV is optional: if it is
   missing (deleted by hand, for example), the song is still listed, marked "no master",
-  and WAV export falls back to decoding the MP4. A loose `.mp4` dropped straight into a
+  and WAV export falls back to decoding the MP3. A loose `.mp3` dropped straight into a
   rating folder is also listed. The next rename or move wraps it in a folder.
 - A file watcher (`notify`) picks up songs that are moved or deleted outside the app.
 
@@ -881,11 +890,11 @@ the original.
 | Action | Effect |
 |---|---|
 | Play / pause / stop / seek | `playback` module. Waveform strip with a click-to-seek bar and a position readout |
-| Name | Writes `©nam`. Can also rename the song: the folder and both files become `<new name>-<seed>`. The `-<seed>` suffix is always kept, and the same `RunName` rules apply. Name collisions get `-2`, `-3`, … The files inside are renamed first, then the folder, and undo reverses the steps |
+| Name | Writes `TIT2`. Can also rename the song: the folder and both files become `<new name>-<seed>`. The `-<seed>` suffix is always kept, and the same `RunName` rules apply. Name collisions get `-2`, `-3`, … The files inside are renamed first, then the folder, and undo reverses the steps |
 | Tag | Adds or removes free-form tags with autocomplete from tags already in the library |
-| Notes | Writes `©cmt` |
-| Rate good / neutral / bad | Writes the rating atom and **moves** the song folder to `reviewed/<rating>/`. Re-rating moves it between rating folders. "Unreview" moves it back |
-| Export | Copies to a chosen folder as MP4, WAV, or MP3. **WAV is copied from the master**, so it is lossless. MP3 (and FLAC) are encoded **from the master**, never from the AAC. Metadata can optionally be stripped. Many songs can be exported at once |
+| Notes | Writes `COMM` |
+| Rate good / neutral / bad | Writes the rating frame and **moves** the song folder to `reviewed/<rating>/`. Re-rating moves it between rating folders. "Unreview" moves it back |
+| Export | Copies to a chosen folder as MP3, WAV, or FLAC. **MP3 is the library file itself** (no re-encode). **WAV is copied from the master**, so it is lossless. FLAC is encoded **from the master**, never from the MP3. Metadata can optionally be stripped. Many songs can be exported at once |
 | Regenerate | Section 6.2 |
 | Delete | Moves the song folder to the system trash (`trash` crate), never a hard delete |
 
@@ -899,6 +908,11 @@ rate/move/rename.
 A focused view that walks through `unreviewed/` in creation order and plays each song
 automatically:
 
+Leaving the tab and coming back resumes the review: the playing song keeps playing and
+the place in the queue is kept. A song playing from another tab is left alone until
+`Space` switches to the review song. *Restart review* starts over from the oldest
+unreviewed song.
+
 | Key | Action |
 |---|---|
 | `Space` | Play / pause |
@@ -907,6 +921,7 @@ automatically:
 | `N` / `P` | Next / previous song without rating |
 | `T` | Focus the tag field |
 | `R` | Focus the rename field |
+| `L` | Show / hide the lyrics popup. It follows the review song, and the keys above keep working while it is open. `Esc` also closes it |
 
 ---
 
@@ -926,9 +941,20 @@ Panels (eframe, native):
 3. **Queue:** runs and jobs with their state, seed, revision, server, elapsed time and ETA.
    Each active run has an **inline editor** for params, count, and next seed, plus
    pause/resume/stop (section 5.1.2). A job is cancelled with its own button.
-4. **Library:** a filterable table (folder/rating, tag, text search, run name, seed range, revision). Selecting a
+4. **Projects:** the `inputs/<name>/` folders (section 5.2.1), searchable by name or
+   reference file. Selecting one shows its reference, transcription, ABC source, and run
+   and song counts. There are buttons to **Load into Generate**, show its songs in the
+   Audio Library, open the folder, **rename** it, and **delete** it (to the system trash).
+   Rename and delete are disabled while a queued run or a transcription is writing to the
+   project. Renaming doesn't touch songs: their recipes keep the old run name.
+5. **Inputs:** every reference audio across projects, one row per distinct file
+   (SHA-256), with its format, size, projects, and transcription. Each row can be played,
+   **used** in the project named in Generate (an existing transcription is reused, and a
+   different reference there is replaced only after the usual confirmation), or
+   re-transcribed.
+6. **Audio Library:** a filterable table (folder/rating, tag, text search, run name, seed range, revision). Selecting a
    song shows the player, the metadata editor, and a read-only recipe view.
-5. **Log:** core `tracing` output plus server stdout for `Headless` launches.
+7. **Log:** core `tracing` output plus server stdout for `Headless` launches.
 
 Every interactive widget gets a stable, **unique accessible label**, or an explicit
 `id_salt` plus an AccessKit label. The headless tests (section 9.3) depend on these
@@ -954,12 +980,12 @@ labels.
   semantics** (serde_json `Value` equality). The YuE2 response parses correctly,
   including `timing`, and a mismatch between the WAV header and `sample_rate`/`channels`
   is detected.
-- `media`: writing and reading back the recipe, tag, and rating atoms on a tiny fixture
-  MP4. Base64 stream decoding.
+- `media`: writing and reading back the recipe, tag, and rating frames on a tiny fixture
+  MP3. Base64 stream decoding.
 - `library`: rate → move, re-rate, unreview, name collisions, undo, and rebuilding the
   index after external changes (with `tempfile`). Every operation moves or renames the
   **whole song folder**, and the folder and both files keep the same stem. Also tested:
-  songs whose WAV is missing, loose MP4s, leftover `*.part` folders being cleaned up, and
+  songs whose WAV is missing, loose MP3s, leftover `*.part` folders being cleaned up, and
   a WAV whose hash doesn't match `wav_sha256` being flagged.
 - `gui-core`: the `update()` reducer: the right `Command`s for each `UiAction`, review
   navigation, and form validation.
@@ -969,7 +995,7 @@ labels.
 - A **mock audio.cpp server** (`axum` on an ephemeral port) that serves the fixture
   responses. It can inject delay, errors, and a mid-job crash. Tests cover:
   - A 2-server run spreads jobs across both, and the output is a
-    `unreviewed/<name>-<seed>/` folder with `<name>-<seed>.mp4` and `<name>-<seed>.wav`
+    `unreviewed/<name>-<seed>/` folder with `<name>-<seed>.mp3` and `<name>-<seed>.wav`
     for every seed from `start_seed` to `start_seed + count - 1`. Each has the correct
     recipe, and each WAV is byte-identical to the server's audio.
   - Editing params partway through: songs that started before the edit record revision N,
@@ -1047,7 +1073,7 @@ Scenarios:
 | GUI | `eframe`, `egui`, `egui_extras` (tables), `egui_kittest` (dev) |
 | Async / HTTP | `tokio`, `reqwest` (`json`, `stream`) |
 | Serialization | `serde`, `serde_json`, `ron` (≥ 0.9 for `explicit_struct_names`) |
-| Media | `mp4ameta` (tags), `symphonia` (`aac`, `isomp4`, `wav`), `rodio` or `cpal` (output), external `ffmpeg` |
+| Media | `id3` (tags), `symphonia` (`mp3`, `wav`, `pcm`), `rodio` or `cpal` (output), external `ffmpeg` |
 | Misc | `base64`, `sha2`, `ulid`, `rand`, `directories`, `notify`, `trash`, `thiserror`, `tracing`, `nix` (Unix signals, `cfg(unix)`), `which` (probing for the opener and terminal) |
 | Test | `tempfile`, `axum` (mock server), `pretty_assertions`, `insta` (optional) |
 
@@ -1057,7 +1083,7 @@ Scenarios:
 
 1. **M1 Core skeleton:** workspace, config, API client and mock server, one job end to end
    → WAV on disk.
-2. **M2 Media and library:** MP4 encode, recipe metadata, folder layout, rate/move/tag
+2. **M2 Media and library:** MP3 encode, recipe metadata, folder layout, rate/move/tag
    (all tested without a GUI).
 3. **M3 Scheduler:** multiple servers, retries, cancellation, launcher (Native
    `.desktop` on Linux, plus Command and Headless).
@@ -1079,5 +1105,5 @@ Scenarios:
 | ~~Q5~~ | **Resolved:** SheetSage2 is always unloaded after each transcription, because a song is usually transcribed only once, at the start of a run. There is no setting (section 5.2) |
 | ~~Q6~~ | **Resolved:** a running task can't be cancelled. Closing the request doesn't stop the GPU work, and even `kill -9` only takes effect once the job finishes. Cancel therefore means "let it finish and discard the result", with the request kept open so the worker knows when the GPU is free. Stop puts the server in `Stopping` until the process has actually exited (sections 1.4, 4.2, 5.3) |
 | ~~Q7~~ | **Resolved:** first come, first served. The next free server takes the next seed, from the oldest active run that still has work. No server is ever pinned to a run, and there is no interleave setting (section 5.3) |
-| ~~Q8~~ | **Resolved:** keep the WAV master. Each song is a `<name>-<seed>/` folder that holds `<name>-<seed>.mp4` and `<name>-<seed>.wav`. The folder is what gets moved, renamed, and deleted. WAV export copies the master, and other formats are encoded from it (sections 6.1, 7.1, 7.2) |
+| ~~Q8~~ | **Resolved:** keep the WAV master. Each song is a `<name>-<seed>/` folder that holds `<name>-<seed>.mp3` and `<name>-<seed>.wav`. The folder is what gets moved, renamed, and deleted. WAV export copies the master, and other formats are encoded from it (sections 6.1, 7.1, 7.2) |
 | ~~Q9~~ | **Resolved:** the server accepts only WAV. Every reference is converted to WAV with ffmpeg (PCM s16 WAV passes through) and uploaded with the captured `audio/vnd.wave` + `upload.wav` headers. The original, the converted WAV, and the transcriptions are kept in a per-name **project** folder, `inputs/<name>/` (sections 1.3, 5.2, 5.2.1) |

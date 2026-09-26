@@ -3,8 +3,11 @@
 Config(
     server_binary: "/mnt/storage/audiocpp/audiocpp_server",
     working_dir: "/mnt/storage/audiocpp",
-    terminal: Native,          // .desktop on Linux, .command on macOS, .cmd on Windows
-                               // or: Command(["kitty", "--title", "{name}", "--", "{script}"]), Headless
+    // How launched servers are run:
+    //   Native   — open a terminal window (.desktop on Linux, .command on macOS, .cmd on Windows)
+    //   Command(["kitty", "--title", "{name}", "--", "{script}"]) — open a terminal of your choice
+    //   Headless — no terminal; the server's output goes to the app's log panel
+    terminal: Native,
     request_timeout_secs: 1800,
 
     servers: [
@@ -49,8 +52,8 @@ Config(
     ),
 
     library: Library(
-        root: "~/Music/audiocpp",               // unreviewed/, reviewed/{good,neutral,bad}/, inputs/
-        encoder: Aac(bitrate_kbps: 256),        // or: Alac
+        root: "/mnt/storage/audiocpp/audioui_lib",               // unreviewed/, reviewed/{good,neutral,bad}/, inputs/
+        encoder: Vbr(quality: 0),               // LAME -V0..9; or: Cbr(bitrate_kbps: 320)
     ),
 
     defaults: "presets/default.ron",            // relative to this file

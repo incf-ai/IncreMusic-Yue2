@@ -10,6 +10,9 @@ RUN apt-get update && apt-get install -y \
     libxkbcommon-x11-0 \
     libgl1 \
     libegl1 \
+    ffmpeg \
+    libasound2-dev \
+    xterm \
     && rm -rf /var/lib/apt/lists/*
 
 # --- AMD ROCm userspace + ROCm-enabled onnxruntime -------------------------
@@ -58,6 +61,21 @@ RUN (getent group video >/dev/null || groupadd video) \
 ENV LD_LIBRARY_PATH=/opt/rocm/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 
 RUN chown -R vscode:rustlang "$CARGO_HOME" "$RUSTUP_HOME"
+RUN apt-get update && apt-get install -y \
+    zenity \
+    && rm -rf /var/lib/apt/lists/*
+
+# Audio: no /dev/snd in the container; instead the host's PulseAudio/PipeWire
+# socket is bind-mounted (see devcontainer.json) and ALSA -- which cpal uses --
+# is routed to it via the pulse plugin from libasound2-plugins.
+# pulseaudio-utils provides `pactl info` / `paplay` for testing.
+RUN apt-get update && apt-get install -y \
+    libasound2-plugins \
+    pulseaudio-utils \
+    && rm -rf /var/lib/apt/lists/* \
+    && printf 'pcm.!default { type pulse }\nctl.!default { type pulse }\n' > /etc/asound.conf
+
 USER vscode
 RUN rustup toolchain install nightly --component llvm-tools-preview \
     && cargo install cargo-llvm-cov --locked
+

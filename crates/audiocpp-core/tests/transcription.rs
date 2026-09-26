@@ -157,8 +157,8 @@ fn transcribe_then_generate_for_every_input_kind() {
             .load(&name)
             .unwrap();
         assert_eq!(project.runs.len(), 1);
-        let mp4 = lib.path().join(format!("unreviewed/{name}-1/{name}-1.mp4"));
-        let recipe = audiocpp_core::media::read_meta(&mp4)
+        let mp3 = lib.path().join(format!("unreviewed/{name}-1/{name}-1.mp3"));
+        let recipe = audiocpp_core::media::read_meta(&mp3)
             .unwrap()
             .recipe
             .unwrap();

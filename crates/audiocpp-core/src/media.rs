@@ -1,4 +1,4 @@
-//! WAV → MP4 via `ffmpeg`, MP4 metadata atoms, the recipe record and waveform peaks
+//! WAV → MP3 via `ffmpeg`, ID3v2 metadata frames, the recipe record and waveform peaks
 //! (design §6).
 
 use std::ffi::OsString;
@@ -116,19 +116,34 @@ pub struct SongMeta {
     pub duration_ms: Option<u64>,
 }
 
+/// Prefix of the app's `TXXX` frame descriptions, e.g. `org.audiocpp-ui:recipe`.
 const MEAN: &str = "org.audiocpp-ui";
+const ID3_VERSION: id3::Version = id3::Version::Id3v24;
 
-fn ident(name: &str) -> mp4ameta::FreeformIdent<'_, mp4ameta::ident::BorrowedStr<'_>> {
-    mp4ameta::FreeformIdent::new_borrowed(MEAN, name)
+fn txxx(name: &str) -> String {
+    format!("{MEAN}:{name}")
 }
 
 fn meta_err(path: &Path, e: impl std::fmt::Display) -> Error {
     Error::Metadata(format!("{}: {e}", path.display()))
 }
 
+/// The file's ID3v2 tag, or an empty one if it has none (e.g. a loose MP3 from elsewhere).
+fn read_tag(path: &Path) -> Result<id3::Tag> {
+    id3::no_tag_ok(id3::Tag::read_from_path(path))
+        .map(Option::unwrap_or_default)
+        .map_err(|e| meta_err(path, e))
+}
+
 pub fn read_meta(path: &Path) -> Result<SongMeta> {
-    let tag = mp4ameta::Tag::read_from_path(path).map_err(|e| meta_err(path, e))?;
-    let first = |name: &str| tag.strings_of(&ident(name)).next().map(str::to_string);
+    use id3::TagLike;
+    let tag = read_tag(path)?;
+    let first = |name: &str| {
+        let d = txxx(name);
+        tag.extended_texts()
+            .find(|t| t.description == d)
+            .map(|t| t.value.clone())
+    };
     let recipe = match first("recipe") {
         Some(json) => match serde_json::from_str(&json) {
             Ok(r) => Some(r),
@@ -141,38 +156,79 @@ pub fn read_meta(path: &Path) -> Result<SongMeta> {
     };
     let tags = first("tags")
         .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
-        .unwrap_or_else(|| tag.keywords().map(str::to_string).collect());
-    let duration = tag.duration();
+        .unwrap_or_default();
     Ok(SongMeta {
         title: tag.title().map(str::to_string),
-        comment: tag.comment().map(str::to_string),
-        encoder: tag.encoder().map(str::to_string),
+        comment: tag
+            .comments()
+            .find(|c| c.description.is_empty())
+            .map(|c| c.text.clone()),
+        encoder: tag
+            .get("TSSE")
+            .and_then(|f| f.content().text())
+            .map(str::to_string),
         tags,
         rating: first("rating").as_deref().and_then(Rating::parse),
         recipe,
-        duration_ms: (!duration.is_zero()).then_some(duration.as_millis() as u64),
+        duration_ms: mp3_duration_ms(path),
     })
 }
 
-/// Writes all app-managed atoms in place (no re-encode).
+/// Playable length from the stream headers (the Xing/LAME frame for VBR); no full decode.
+fn mp3_duration_ms(path: &Path) -> Option<u64> {
+    use symphonia::core::formats::probe::Hint;
+    use symphonia::core::formats::{FormatOptions, TrackType};
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+
+    let file = std::fs::File::open(path).ok()?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let format = symphonia::default::get_probe()
+        .probe(
+            Hint::new().with_extension("mp3"),
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
+        .ok()?;
+    let track = format.default_track(TrackType::Audio)?;
+    let rate = track.codec_params.as_ref()?.audio()?.sample_rate?;
+    let frames = track.num_frames?;
+    (frames > 0).then(|| frames * 1000 / u64::from(rate))
+}
+
+/// Writes all app-managed ID3v2.4 frames in place (no re-encode).
 pub fn write_meta(path: &Path, meta: &SongMeta) -> Result<()> {
-    let mut tag = mp4ameta::Tag::read_from_path(path).map_err(|e| meta_err(path, e))?;
+    use id3::TagLike;
+    use id3::frame::{Comment, ExtendedText};
+    let mut tag = read_tag(path)?;
     match &meta.title {
         Some(t) => tag.set_title(t.clone()),
         None => tag.remove_title(),
     }
-    match &meta.comment {
-        Some(c) if !c.is_empty() => tag.set_comment(c.clone()),
-        _ => tag.remove_comments(),
+    tag.remove_comment(Some(""), None);
+    if let Some(c) = meta.comment.as_ref().filter(|c| !c.is_empty()) {
+        tag.add_frame(Comment {
+            lang: "eng".into(),
+            description: String::new(),
+            text: c.clone(),
+        });
     }
-    tag.set_encoder(
+    tag.set_text(
+        "TSSE",
         meta.encoder
             .clone()
             .unwrap_or_else(|| format!("audiocpp-ui {}", crate::APP_VERSION)),
     );
-    let set = |tag: &mut mp4ameta::Tag, name: &str, v: Option<String>| match v {
-        Some(v) => tag.set_data(ident(name), mp4ameta::Data::Utf8(v)),
-        None => tag.remove_data_of(&ident(name)),
+    let mut set = |name: &str, v: Option<String>| {
+        let d = txxx(name);
+        tag.remove_extended_text(Some(&d), None);
+        if let Some(value) = v {
+            tag.add_frame(ExtendedText {
+                description: d,
+                value,
+            });
+        }
     };
     let recipe = meta
         .recipe
@@ -180,26 +236,21 @@ pub fn write_meta(path: &Path, meta: &SongMeta) -> Result<()> {
         .map(serde_json::to_string)
         .transpose()
         .map_err(|e| meta_err(path, e))?;
-    set(&mut tag, "recipe", recipe);
-    let tags = serde_json::to_string(&meta.tags).expect("tags json");
-    set(&mut tag, "tags", Some(tags));
-    tag.set_keywords(meta.tags.iter().cloned());
-    if meta.tags.is_empty() {
-        tag.remove_keywords();
-    }
+    set("recipe", recipe);
     set(
-        &mut tag,
-        "rating",
-        meta.rating.map(|r| r.as_str().to_string()),
+        "tags",
+        Some(serde_json::to_string(&meta.tags).expect("tags json")),
     );
-    tag.write_to_path(path).map_err(|e| meta_err(path, e))
+    set("rating", meta.rating.map(|r| r.as_str().to_string()));
+    tag.write_to_path(path, ID3_VERSION)
+        .map_err(|e| meta_err(path, e))
 }
 
-/// Removes every metadata atom (for exports with "strip metadata").
+/// Removes the ID3v2 tag entirely (for exports with "strip metadata").
 pub fn strip_meta(path: &Path) -> Result<()> {
-    let mut tag = mp4ameta::Tag::read_from_path(path).map_err(|e| meta_err(path, e))?;
-    tag.clear_meta_items();
-    tag.write_to_path(path).map_err(|e| meta_err(path, e))
+    id3::Tag::remove_from_path(path)
+        .map(drop)
+        .map_err(|e| meta_err(path, e))
 }
 
 // ---------------------------------------------------------------------------------------
@@ -239,18 +290,16 @@ impl ProbeInfo {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExportFormat {
-    Mp4,
-    Wav,
     Mp3,
+    Wav,
     Flac,
 }
 
 impl ExportFormat {
     pub fn extension(&self) -> &'static str {
         match self {
-            ExportFormat::Mp4 => "mp4",
-            ExportFormat::Wav => "wav",
             ExportFormat::Mp3 => "mp3",
+            ExportFormat::Wav => "wav",
             ExportFormat::Flac => "flac",
         }
     }
@@ -366,24 +415,28 @@ impl Ffmpeg {
         self.run(a)
     }
 
-    /// Encodes the master to MP4 (§6.1).
+    /// Encodes the master to MP3 with LAME (§6.1). ffmpeg writes the Xing/LAME header, so
+    /// players get the exact length and gapless trim.
     pub fn encode(&self, wav: &Path, out: &Path, encoder: Encoder) -> Result<()> {
         let mut a = args(&["-i"]);
         a.push(wav.into());
-        a.push("-vn".into());
+        a.extend(args(&["-vn", "-map_metadata", "-1", "-c:a", "libmp3lame"]));
         match encoder {
-            Encoder::Aac { bitrate_kbps } => {
-                a.extend(args(&["-c:a", "aac", "-b:a"]));
+            Encoder::Vbr { quality } => {
+                a.push("-q:a".into());
+                a.push(quality.to_string().into());
+            }
+            Encoder::Cbr { bitrate_kbps } => {
+                a.push("-b:a".into());
                 a.push(format!("{bitrate_kbps}k").into());
             }
-            Encoder::Alac => a.extend(args(&["-c:a", "alac"])),
         }
-        a.extend(args(&["-movflags", "+faststart", "-f", "mp4"]));
+        a.extend(args(&["-f", "mp3"]));
         a.push(out.into());
         self.run(a)
     }
 
-    /// Encodes the master (or, without one, the MP4) to an export format (§7.2).
+    /// Encodes the master (or, without one, the MP3) to a lossless export format (§7.2).
     pub fn export(&self, src: &Path, out: &Path, format: ExportFormat, strip: bool) -> Result<()> {
         let mut a = args(&["-i"]);
         a.push(src.into());
@@ -392,10 +445,9 @@ impl Ffmpeg {
             a.extend(args(&["-map_metadata", "-1"]));
         }
         a.extend(args(match format {
-            ExportFormat::Mp3 => &["-c:a", "libmp3lame", "-q:a", "2"],
+            ExportFormat::Mp3 => &["-c:a", "copy"],
             ExportFormat::Flac => &["-c:a", "flac"],
             ExportFormat::Wav => &["-c:a", "pcm_s16le"],
-            ExportFormat::Mp4 => &["-c:a", "copy"],
         }));
         a.push(out.into());
         self.run(a)
@@ -501,9 +553,9 @@ pub(crate) mod tests {
     }
 
     fn tiny_copy(dir: &Path) -> PathBuf {
-        let p = dir.join("t.mp4");
+        let p = dir.join("t.mp3");
         std::fs::copy(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/tiny.mp4"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/tiny.mp3"),
             &p,
         )
         .unwrap();
@@ -535,8 +587,12 @@ pub(crate) mod tests {
             Some(concat!("audiocpp-ui ", env!("CARGO_PKG_VERSION")))
         );
         assert!(back.duration_ms.unwrap() > 100);
-        let tag = mp4ameta::Tag::read_from_path(&p).unwrap();
-        assert_eq!(tag.keywords().collect::<Vec<_>>(), vec!["upbeat", "keeper"]);
+        let tag = id3::Tag::read_from_path(&p).unwrap();
+        assert_eq!(tag.version(), id3::Version::Id3v24);
+        assert!(
+            tag.extended_texts()
+                .any(|t| t.description == "org.audiocpp-ui:rating" && t.value == "good")
+        );
 
         // edit in place: clear rating, change tags
         let mut m2 = back.clone();
@@ -552,6 +608,7 @@ pub(crate) mod tests {
         let s = read_meta(&p).unwrap();
         assert_eq!(s.recipe, None);
         assert_eq!(s.title, None);
+        assert_eq!(s.duration_ms, back.duration_ms, "audio untouched");
     }
 
     #[test]

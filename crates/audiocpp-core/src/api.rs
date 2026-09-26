@@ -71,11 +71,34 @@ pub struct UploadResponse {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct Timing {
+    #[serde(deserialize_with = "ms")]
     pub wall_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "opt_ms",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub audio_duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtf: Option<f64>,
+}
+
+/// Milliseconds as an integer or, from newer servers, a float (`69719.4`): rounded.
+fn ms<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<u64, D::Error> {
+    let v = f64::deserialize(d)?;
+    if v.is_finite() && v >= 0.0 {
+        Ok(v.round() as u64)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "invalid milliseconds {v}"
+        )))
+    }
+}
+
+fn opt_ms<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<u64>, D::Error> {
+    #[derive(Deserialize)]
+    struct W(#[serde(deserialize_with = "ms")] u64);
+    Ok(Option::<W>::deserialize(d)?.map(|W(v)| v))
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -787,5 +810,23 @@ mod tests {
         .unwrap();
         let path = har["request"]["audio"].as_str().unwrap();
         assert_eq!(AudioCppClient::transcribe_body("sheetsage2", path), har);
+    }
+
+    #[test]
+    fn timing_accepts_float_milliseconds() {
+        let t: Timing = serde_json::from_str(
+            r#"{"wall_ms": 69719.432198, "audio_duration_ms": 30000.6, "rtf": 2.32}"#,
+        )
+        .unwrap();
+        assert_eq!((t.wall_ms, t.audio_duration_ms), (69719, Some(30001)));
+        let t: Timing = serde_json::from_str(r#"{"wall_ms": 5}"#).unwrap();
+        assert_eq!((t.wall_ms, t.audio_duration_ms), (5, None));
+        let t: Timing =
+            serde_json::from_str(r#"{"wall_ms": 5, "audio_duration_ms": null}"#).unwrap();
+        assert_eq!(t.audio_duration_ms, None);
+        assert!(serde_json::from_str::<Timing>(r#"{"wall_ms": -1}"#).is_err());
+        // recipes written before still round-trip
+        let back: Timing = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(back, t);
     }
 }

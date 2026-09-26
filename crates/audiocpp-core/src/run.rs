@@ -91,7 +91,7 @@ impl RunName {
         &self.0
     }
 
-    /// `<name>-<seed>`: the folder, both files and the MP4 title (§5.1.1).
+    /// `<name>-<seed>`: the folder, both files and the MP3 title (§5.1.1).
     pub fn stem(&self, seed: u32) -> String {
         format!("{}-{seed}", self.0)
     }

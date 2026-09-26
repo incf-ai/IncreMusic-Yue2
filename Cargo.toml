@@ -25,7 +25,7 @@ ron = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"
-symphonia = { version = "0.6", default-features = false, features = ["aac", "isomp4", "wav", "pcm", "alac"] }
+symphonia = { version = "0.6", default-features = false, features = ["mp3", "wav", "pcm"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
@@ -33,7 +33,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 trash = "5"
 ulid = { version = "3", features = ["serde"] }
 which = "8"
-mp4ameta = "0.13"
+id3 = "1"
 nix = { version = "0.31", features = ["signal", "process"] }
 
 eframe = "0.36"

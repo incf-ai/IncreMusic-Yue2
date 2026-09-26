@@ -6,6 +6,7 @@ pub mod api;
 pub mod config;
 pub mod error;
 pub mod fsutil;
+pub mod history;
 pub mod launcher;
 pub mod library;
 pub mod media;

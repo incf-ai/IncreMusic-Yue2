@@ -14,7 +14,8 @@
 		"RUST_TEST_THREADS": "8",
 		"CARGO_BUILD_JOBS": "8",
 		"DISPLAY": "${localEnv:DISPLAY}",
-		"CLAUDE_CONFIG_DIR": "/home/vscode/.claude-config"
+		"CLAUDE_CONFIG_DIR": "/home/vscode/.claude-config",
+		"PULSE_SERVER": "unix:/tmp/pulse-native"
 	},
 	"runArgs": [
 		"--name=devcontainer-audiocpp-ui",
@@ -28,6 +29,7 @@
 	],
 	"mounts": [
 		"source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind",
+		"source=${localEnv:XDG_RUNTIME_DIR}/pulse/native,target=/tmp/pulse-native,type=bind",
 		"source=${localWorkspaceFolder}/.devcontainer/devcontainer.json,target=/workspace/.devcontainer/devcontainer.json,type=bind,readonly",
 		"source=${localWorkspaceFolder}/.devcontainer/Dockerfile,target=/workspace/.devcontainer/Dockerfile,type=bind,readonly",
 		"source=/mnt/storage/audiocpp,target=/mnt/storage/audiocpp,type=bind",

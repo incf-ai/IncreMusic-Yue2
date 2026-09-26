@@ -136,6 +136,8 @@ pub enum Outcome {
 pub trait SchedulerEvents: Send + Sync {
     fn job(&self, info: JobInfo);
     fn run(&self, snap: RunSnapshot);
+    /// The run left the queue; no further events follow for it or its jobs.
+    fn run_removed(&self, id: RunId);
 }
 
 struct RunEntry {
@@ -302,6 +304,55 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Deletes a paused, stopping or finished run from the queue. Queued retries are
+    /// dropped and running jobs are cancelled (their results discarded). Active runs must
+    /// be paused or stopped first.
+    pub fn remove_run(&self, id: RunId) -> Result<()> {
+        let mut inner = self.inner.lock();
+        let at = inner
+            .runs
+            .iter()
+            .position(|r| r.state.id == id)
+            .ok_or_else(|| Error::Other(format!("unknown run {id}")))?;
+        if inner.runs[at].state.status == RunStatus::Active {
+            return Err(Error::Other(
+                "pause or stop the run before deleting it".into(),
+            ));
+        }
+        inner.runs.remove(at);
+        // silent: the run is gone, so its jobs are too; running ones stay as `Cancelling`
+        // until the worker reports back so it knows to discard the result
+        let inner = &mut *inner;
+        inner.jobs.retain(|_, j| {
+            if j.run_id != id {
+                return true;
+            }
+            match j.state {
+                JobState::Running {
+                    server,
+                    started,
+                    estimate_ms,
+                } => {
+                    j.state = JobState::Cancelling {
+                        server,
+                        started,
+                        estimate_ms,
+                    };
+                    true
+                }
+                JobState::Cancelling { .. } | JobState::Encoding => true,
+                _ => false,
+            }
+        });
+        let jobs = &inner.jobs;
+        inner.job_runs.retain(|j, _| jobs.contains_key(j));
+        self.events.run_removed(id);
+        for i in at..inner.runs.len() {
+            self.events.run(Self::snapshot(&inner.runs, i));
+        }
+        Ok(())
+    }
+
     /// Moves a run to a new queue position (drag to reorder).
     pub fn move_run(&self, id: RunId, to: usize) -> Result<()> {
         let mut inner = self.inner.lock();
@@ -462,6 +513,11 @@ impl Scheduler {
             Some(JobState::Cancelling { .. })
         );
         let Some(ri) = inner.runs.iter().position(|r| r.state.id == job.run_id) else {
+            // run was deleted: forget the job once it stops running (encoding keeps its song)
+            if !matches!(outcome, Outcome::Encoding(_)) || cancelled {
+                inner.jobs.remove(&job.id);
+                inner.job_runs.remove(&job.id);
+            }
             return;
         };
         let mut release = true;
@@ -567,6 +623,7 @@ mod tests {
         fn run(&self, snap: RunSnapshot) {
             self.1.lock().push(snap);
         }
+        fn run_removed(&self, _: RunId) {}
     }
 
     fn spec(name: &str, start: u32, count: Option<u32>) -> RunSpec {
@@ -746,6 +803,33 @@ mod tests {
             JobState::Done(SongId("kept".into()))
         );
         assert_eq!(s.run(run).unwrap().status, RunStatus::Done);
+    }
+
+    #[test]
+    fn remove_run_needs_pause_or_stop_and_cancels_its_jobs() {
+        let (s, _) = sched();
+        let a = s.add_run(spec("a", 0, None));
+        let b = s.add_run(spec("b", 0, Some(5)));
+        let j0 = job(s.next_work(S0, None));
+        let j1 = job(s.next_work(S1, None));
+        s.finish(&j0, Outcome::Retry("x".into()));
+        assert!(s.remove_run(a).is_err(), "active runs can't be deleted");
+        s.pause_run(a).unwrap();
+        s.remove_run(a).unwrap();
+        assert!(s.run(a).is_none());
+        assert!(s.job(j0.id).is_none(), "queued retry dropped");
+        assert!(
+            s.is_cancelled(j1.id),
+            "running job's result will be discarded"
+        );
+        assert_eq!(job(s.next_work(S0, None)).run_id, b);
+        s.finish(&j1, Outcome::Discarded);
+        assert!(s.job(j1.id).is_none());
+        assert_eq!(s.runs().len(), 1);
+        assert_eq!(s.runs()[0].position, 0);
+        s.stop_run(b).unwrap();
+        s.remove_run(b).unwrap();
+        assert!(s.runs().is_empty());
     }
 
     #[test]

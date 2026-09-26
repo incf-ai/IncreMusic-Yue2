@@ -19,7 +19,7 @@ pub enum AbcChoice {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct GenerateForm {
-    /// Required; cleared after every run starts.
+    /// Required; kept after a run starts.
     pub name: String,
     pub seed: String,
     pub count: String,
@@ -41,7 +41,7 @@ impl Default for GenerateForm {
     fn default() -> Self {
         GenerateForm {
             name: String::new(),
-            seed: String::new(),
+            seed: "0".into(),
             count: "10".into(),
             until_stopped: false,
             params: GenerationParams::default(),
@@ -253,6 +253,8 @@ mod tests {
         f.until_stopped = true;
         assert_eq!(f.blocker(&empty), None);
         f.params.lyrics.clear();
+        assert_eq!(f.blocker(&empty), None, "empty lyrics are allowed");
+        f.params.style.clear();
         assert!(matches!(f.blocker(&empty), Some(Blocker::Params(_))));
     }
 

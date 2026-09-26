@@ -1,7 +1,7 @@
 //! Library folder layout, scanning, rename/tag/rate/move, export and undo (design §7).
 //!
 //! The song folder is the unit: every move, rename and delete acts on the whole folder so
-//! the MP4 and its WAV master never drift apart.
+//! the MP3 and its WAV master never drift apart.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -21,6 +21,8 @@ pub const REVIEWED: &str = "reviewed";
 pub const INPUTS: &str = "inputs";
 pub const EXPORTS: &str = "exports";
 pub const CACHE: &str = ".cache";
+/// Run history records (`history.rs`).
+pub const RUNS: &str = "runs";
 pub const PART_SUFFIX: &str = ".part";
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -66,9 +68,9 @@ pub struct Song {
     pub id: SongId,
     /// Folder name and file stem, `<name>-<seed>`.
     pub stem: String,
-    /// The song folder; `None` for a loose MP4 dropped into a rating folder.
+    /// The song folder; `None` for a loose MP3 dropped into a rating folder.
     pub dir: Option<PathBuf>,
-    pub mp4: PathBuf,
+    pub mp3: PathBuf,
     /// Lossless master; `None` → "no master".
     pub wav: Option<PathBuf>,
     pub location: Location,
@@ -112,6 +114,17 @@ impl Song {
         self.meta.recipe.as_ref().map(|r| r.has_abc())
     }
 
+    /// The lyrics the song was generated from, per its recipe. `None` without a recipe or
+    /// when the lyrics were empty.
+    pub fn lyrics(&self) -> Option<&str> {
+        self.meta
+            .recipe
+            .as_ref()
+            .and_then(|r| r.request.pointer("/request/lyrics"))
+            .and_then(|v| v.as_str())
+            .filter(|l| !l.trim().is_empty())
+    }
+
     pub fn title(&self) -> &str {
         self.meta.title.as_deref().unwrap_or(&self.stem)
     }
@@ -126,7 +139,7 @@ impl Song {
 
     /// The thing that gets moved: the folder, or the loose file.
     pub fn unit_path(&self) -> &Path {
-        self.dir.as_deref().unwrap_or(&self.mp4)
+        self.dir.as_deref().unwrap_or(&self.mp3)
     }
 }
 
@@ -185,7 +198,7 @@ struct IndexFile {
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename = "Entry")]
 struct IndexEntry {
-    mp4: PathBuf,
+    mp3: PathBuf,
     mtime: (u64, u32),
     size: u64,
     id: String,
@@ -306,7 +319,7 @@ impl Library {
             return HashMap::new();
         };
         match from_ron::<IndexFile>(&text) {
-            Ok(f) => f.entries.into_iter().map(|e| (e.mp4.clone(), e)).collect(),
+            Ok(f) => f.entries.into_iter().map(|e| (e.mp3.clone(), e)).collect(),
             Err(e) => {
                 tracing::warn!("ignoring library index: {e}");
                 HashMap::new()
@@ -320,7 +333,7 @@ impl Library {
             .values()
             .filter_map(|s| {
                 Some(IndexEntry {
-                    mp4: s.mp4.strip_prefix(&self.root).ok()?.to_path_buf(),
+                    mp3: s.mp3.strip_prefix(&self.root).ok()?.to_path_buf(),
                     mtime: mtime_key(s.modified),
                     size: s.size,
                     id: s.id.0.clone(),
@@ -350,7 +363,7 @@ impl Library {
         let by_path: HashMap<PathBuf, SongId> = self
             .songs
             .values()
-            .map(|s| (s.mp4.clone(), s.id.clone()))
+            .map(|s| (s.mp3.clone(), s.id.clone()))
             .collect();
         let mut found = BTreeMap::new();
         for loc in Location::ALL {
@@ -366,17 +379,17 @@ impl Library {
                 if name.starts_with('.') || name.ends_with(PART_SUFFIX) {
                     continue;
                 }
-                let (dir_opt, mp4) = if path.is_dir() {
-                    match find_mp4(&path, &name) {
+                let (dir_opt, mp3) = if path.is_dir() {
+                    match find_mp3(&path, &name) {
                         Some(m) => (Some(path.clone()), m),
                         None => continue,
                     }
-                } else if is_mp4(&path) {
+                } else if is_mp3(&path) {
                     (None, path.clone())
                 } else {
                     continue;
                 };
-                match self.load_song(&index, &by_path, loc, dir_opt, mp4) {
+                match self.load_song(&index, &by_path, loc, dir_opt, mp3) {
                     Ok(song) => {
                         found.insert(song.id.clone(), song);
                     }
@@ -405,27 +418,27 @@ impl Library {
         by_path: &HashMap<PathBuf, SongId>,
         location: Location,
         dir: Option<PathBuf>,
-        mp4: PathBuf,
+        mp3: PathBuf,
     ) -> Result<Song> {
-        let md = std::fs::metadata(&mp4).at(&mp4)?;
+        let md = std::fs::metadata(&mp3).at(&mp3)?;
         let modified = md.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         let size = md.len();
         let stem = match &dir {
             Some(d) => d.file_name().unwrap().to_string_lossy().into_owned(),
-            None => fsutil::file_stem(&mp4),
+            None => fsutil::file_stem(&mp3),
         };
         let wav = dir.as_ref().and_then(|d| find_wav(d, &stem));
         let wav_mtime = wav
             .as_ref()
             .and_then(|w| std::fs::metadata(w).ok()?.modified().ok())
             .map(mtime_key);
-        let rel = mp4.strip_prefix(&self.root).unwrap_or(&mp4).to_path_buf();
+        let rel = mp3.strip_prefix(&self.root).unwrap_or(&mp3).to_path_buf();
         let cached = index
             .get(&rel)
             .filter(|e| e.mtime == mtime_key(modified) && e.size == size);
         let meta = match cached.and_then(|e| serde_json::from_str::<SongMeta>(&e.meta).ok()) {
             Some(m) => m,
-            None => media::read_meta(&mp4)?,
+            None => media::read_meta(&mp3)?,
         };
         let wav_ok = match (&wav, meta.recipe.as_ref()) {
             (Some(w), Some(r)) => match cached.filter(|e| e.wav_mtime == wav_mtime) {
@@ -435,7 +448,7 @@ impl Library {
             _ => None,
         };
         let id = by_path
-            .get(&mp4)
+            .get(&mp3)
             .cloned()
             .or_else(|| meta.recipe.as_ref().map(|r| SongId(r.song_id.clone())))
             .or_else(|| cached.map(|e| SongId(e.id.clone())))
@@ -444,7 +457,7 @@ impl Library {
             id,
             stem,
             dir,
-            mp4,
+            mp3,
             wav,
             location,
             meta,
@@ -460,10 +473,10 @@ impl Library {
         id: &SongId,
         location: Location,
         dir: Option<PathBuf>,
-        mp4: PathBuf,
+        mp3: PathBuf,
     ) -> Result<Song> {
-        let by_path = HashMap::from([(mp4.clone(), id.clone())]);
-        let song = self.load_song(&HashMap::new(), &by_path, location, dir, mp4)?;
+        let by_path = HashMap::from([(mp3.clone(), id.clone())]);
+        let song = self.load_song(&HashMap::new(), &by_path, location, dir, mp3)?;
         self.songs.insert(id.clone(), song.clone());
         Ok(song)
     }
@@ -510,14 +523,14 @@ impl Library {
         let dest = self.root.join(UNREVIEWED).join(stem);
         self.reserved.remove(stem);
         std::fs::rename(part, &dest).at(part)?;
-        let mp4 = find_mp4(&dest, stem)
-            .ok_or_else(|| Error::Library(format!("{} has no mp4", dest.display())))?;
+        let mp3 = find_mp3(&dest, stem)
+            .ok_or_else(|| Error::Library(format!("{} has no mp3", dest.display())))?;
         let song = self.load_song(
             &HashMap::new(),
             &HashMap::new(),
             Location::Unreviewed,
             Some(dest),
-            mp4,
+            mp3,
         )?;
         self.songs.insert(song.id.clone(), song.clone());
         self.save_index();
@@ -559,8 +572,8 @@ impl Library {
         let song = self.song(id)?.clone();
         let mut meta = song.meta.clone();
         f(&mut meta);
-        media::write_meta(&song.mp4, &meta)?;
-        let s = self.refresh(id, song.location, song.dir.clone(), song.mp4.clone())?;
+        media::write_meta(&song.mp3, &meta)?;
+        let s = self.refresh(id, song.location, song.dir.clone(), song.mp3.clone())?;
         self.save_index();
         Ok(Self::one(s))
     }
@@ -593,22 +606,21 @@ impl Library {
             .collect()
     }
 
-    /// Wraps a loose MP4 in a folder named after its stem.
+    /// Wraps a loose MP3 in a folder named after its stem.
     fn wrap_loose(&mut self, id: &SongId) -> Result<()> {
         let song = self.song(id)?.clone();
         if song.dir.is_some() {
             return Ok(());
         }
-        let parent = song.mp4.parent().unwrap().to_path_buf();
+        let parent = song.mp3.parent().unwrap().to_path_buf();
         let stem = fsutil::unique_stem(&parent, &song.stem, |s| {
             s != song.stem && self.stem_taken(s)
         });
         let dir = parent.join(&stem);
         std::fs::create_dir(&dir).at(&dir)?;
-        let ext = fsutil::extension_lower(&song.mp4).unwrap_or_else(|| "mp4".into());
-        let mp4 = dir.join(format!("{stem}.{ext}"));
-        std::fs::rename(&song.mp4, &mp4).at(&song.mp4)?;
-        self.refresh(id, song.location, Some(dir), mp4)?;
+        let mp3 = dir.join(format!("{stem}.mp3"));
+        std::fs::rename(&song.mp3, &mp3).at(&song.mp3)?;
+        self.refresh(id, song.location, Some(dir), mp3)?;
         Ok(())
     }
 
@@ -626,7 +638,7 @@ impl Library {
         let mut meta = song.meta.clone();
         meta.rating = rating;
         if meta != song.meta {
-            media::write_meta(&song.mp4, &meta)?;
+            media::write_meta(&song.mp3, &meta)?;
         }
         let to = if song.location == to_loc {
             from.clone()
@@ -640,7 +652,7 @@ impl Library {
             let to = dest_dir.join(&stem);
             if let Err(e) = fsutil::move_dir(&from, &to) {
                 if meta != song.meta {
-                    let _ = media::write_meta(&song.mp4, &song.meta);
+                    let _ = media::write_meta(&song.mp3, &song.meta);
                 }
                 return Err(e);
             }
@@ -656,8 +668,8 @@ impl Library {
             });
         }
         let stem = to.file_name().unwrap().to_string_lossy().into_owned();
-        let mp4 = find_mp4(&to, &stem).ok_or_else(|| Error::Library("mp4 vanished".into()))?;
-        let s = self.refresh(id, to_loc, Some(to), mp4)?;
+        let mp3 = find_mp3(&to, &stem).ok_or_else(|| Error::Library("mp3 vanished".into()))?;
+        let s = self.refresh(id, to_loc, Some(to), mp3)?;
         self.save_index();
         Ok(Self::one(s))
     }
@@ -710,7 +722,7 @@ impl Library {
         if let Some(t) = title {
             let mut meta = song.meta.clone();
             meta.title = t;
-            media::write_meta(&song.mp4, &meta)?;
+            media::write_meta(&song.mp3, &meta)?;
         }
         // files first, then the folder (§7.2)
         let done = self.rename_files(&dir, &song.stem, new_stem)?;
@@ -721,9 +733,9 @@ impl Library {
             }
             return Err(Error::io(&dir, e));
         }
-        let mp4 =
-            find_mp4(&new_dir, new_stem).ok_or_else(|| Error::Library("mp4 vanished".into()))?;
-        self.refresh(id, song.location, Some(new_dir), mp4)?;
+        let mp3 =
+            find_mp3(&new_dir, new_stem).ok_or_else(|| Error::Library("mp3 vanished".into()))?;
+        self.refresh(id, song.location, Some(new_dir), mp3)?;
         Ok((parent, song.stem, old_title))
     }
 
@@ -794,7 +806,7 @@ impl Library {
                 }
                 let mut meta = song.meta.clone();
                 meta.rating = prev_rating;
-                media::write_meta(&song.mp4, &meta)?;
+                media::write_meta(&song.mp3, &meta)?;
                 if from != to {
                     let from_stem = from.file_name().unwrap().to_string_lossy().into_owned();
                     if from_stem != song.stem {
@@ -803,9 +815,9 @@ impl Library {
                     fsutil::move_dir(&to, &from)?;
                 }
                 let stem = from.file_name().unwrap().to_string_lossy().into_owned();
-                let mp4 =
-                    find_mp4(&from, &stem).ok_or_else(|| Error::Library("mp4 vanished".into()))?;
-                let s = self.refresh(&id, prev_location, Some(from), mp4)?;
+                let mp3 =
+                    find_mp3(&from, &stem).ok_or_else(|| Error::Library("mp3 vanished".into()))?;
+                let s = self.refresh(&id, prev_location, Some(from), mp3)?;
                 self.save_index();
                 Ok(Self::one(s))
             }
@@ -853,8 +865,8 @@ impl Library {
     }
 }
 
-/// Copies songs to `dest` (§7.2). WAV is copied from the master; MP3/FLAC are encoded
-/// from the master, never from the AAC. Without a master, the MP4 is decoded instead.
+/// Copies songs to `dest` (§7.2). MP3 is the library file itself; WAV is copied from the
+/// master; FLAC is encoded from the master. Without a master, the MP3 is decoded instead.
 pub fn export_songs(
     songs: &[Song],
     ffmpeg: Option<&Ffmpeg>,
@@ -865,10 +877,7 @@ pub fn export_songs(
     std::fs::create_dir_all(dest).at(dest)?;
     let mut out = Vec::new();
     for song in songs {
-        let ext = match format {
-            ExportFormat::Mp4 => fsutil::extension_lower(&song.mp4).unwrap_or_else(|| "mp4".into()),
-            f => f.extension().to_string(),
-        };
+        let ext = format.extension();
         let first = dest.join(format!("{}.{ext}", song.stem));
         let target = if !first.exists() {
             first
@@ -880,18 +889,18 @@ pub fn export_songs(
         };
         let ff = || ffmpeg.ok_or_else(|| Error::Ffmpeg("ffmpeg not configured".into()));
         match format {
-            ExportFormat::Mp4 => {
-                fsutil::copy_file(&song.mp4, &target)?;
+            ExportFormat::Mp3 => {
+                fsutil::copy_file(&song.mp3, &target)?;
                 if strip {
                     media::strip_meta(&target)?;
                 }
             }
             ExportFormat::Wav => match &song.wav {
                 Some(w) => fsutil::copy_file(w, &target)?,
-                None => ff()?.export(&song.mp4, &target, format, true)?,
+                None => ff()?.export(&song.mp3, &target, format, true)?,
             },
-            ExportFormat::Mp3 | ExportFormat::Flac => {
-                let src = song.wav.as_ref().unwrap_or(&song.mp4);
+            ExportFormat::Flac => {
+                let src = song.wav.as_ref().unwrap_or(&song.mp3);
                 ff()?.export(src, &target, format, strip)?;
             }
         }
@@ -908,23 +917,21 @@ pub fn seeds_for<'a>(songs: impl IntoIterator<Item = &'a Song>, name: &str) -> B
         .collect()
 }
 
-fn is_mp4(p: &Path) -> bool {
-    matches!(fsutil::extension_lower(p).as_deref(), Some("mp4" | "m4a"))
+fn is_mp3(p: &Path) -> bool {
+    fsutil::extension_lower(p).as_deref() == Some("mp3")
 }
 
-/// `<stem>.mp4`/`.m4a` if present, else any MP4 in the folder.
-fn find_mp4(dir: &Path, stem: &str) -> Option<PathBuf> {
-    for ext in ["mp4", "m4a"] {
-        let p = dir.join(format!("{stem}.{ext}"));
-        if p.is_file() {
-            return Some(p);
-        }
+/// `<stem>.mp3` if present, else any MP3 in the folder.
+fn find_mp3(dir: &Path, stem: &str) -> Option<PathBuf> {
+    let p = dir.join(format!("{stem}.mp3"));
+    if p.is_file() {
+        return Some(p);
     }
     let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.is_file() && is_mp4(p))
+        .filter(|p| p.is_file() && is_mp3(p))
         .collect();
     v.sort();
     v.into_iter().next()
@@ -951,16 +958,16 @@ mod tests {
     use crate::media::tests::sample_recipe;
     use pretty_assertions::assert_eq;
 
-    const TINY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/tiny.mp4");
+    const TINY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/tiny.mp3");
     const WAV: &[u8] = include_bytes!("../../../tests/fixtures/one_second.wav");
 
-    /// Creates `<loc>/<stem>/<stem>.mp4 + .wav` with a recipe for `name`/`seed`.
+    /// Creates `<loc>/<stem>/<stem>.mp3 + .wav` with a recipe for `name`/`seed`.
     fn add_song(lib_root: &Path, loc: Location, name: &str, seed: u32) -> PathBuf {
         let stem = format!("{name}-{seed}");
         let dir = lib_root.join(loc.rel_dir()).join(&stem);
         std::fs::create_dir_all(&dir).unwrap();
-        let mp4 = dir.join(format!("{stem}.mp4"));
-        std::fs::copy(TINY, &mp4).unwrap();
+        let mp3 = dir.join(format!("{stem}.mp3"));
+        std::fs::copy(TINY, &mp3).unwrap();
         std::fs::write(dir.join(format!("{stem}.wav")), WAV).unwrap();
         let mut r = sample_recipe();
         r.song_id = ulid::Ulid::generate().to_string();
@@ -972,7 +979,7 @@ mod tests {
             recipe: Some(r),
             ..Default::default()
         };
-        media::write_meta(&mp4, &meta).unwrap();
+        media::write_meta(&mp3, &meta).unwrap();
         dir
     }
 
@@ -993,7 +1000,7 @@ mod tests {
     fn assert_unit(song: &Song) {
         let dir = song.dir.as_ref().unwrap();
         assert_eq!(dir.file_name().unwrap().to_string_lossy(), song.stem);
-        assert_eq!(song.mp4, dir.join(format!("{}.mp4", song.stem)));
+        assert_eq!(song.mp3, dir.join(format!("{}.mp3", song.stem)));
         if let Some(w) = &song.wav {
             assert_eq!(w, &dir.join(format!("{}.wav", song.stem)));
         }
@@ -1023,7 +1030,7 @@ mod tests {
         std::fs::remove_file(nowav.join("a-2.wav")).unwrap();
         let bad = add_song(d.path(), Location::Unreviewed, "a", 3);
         std::fs::write(bad.join("a-3.wav"), b"RIFF-corrupted").unwrap();
-        std::fs::copy(TINY, d.path().join("reviewed/bad/loose-9.mp4")).unwrap();
+        std::fs::copy(TINY, d.path().join("reviewed/bad/loose-9.mp3")).unwrap();
         std::fs::create_dir_all(d.path().join("unreviewed/x-1.part")).unwrap();
         std::fs::create_dir_all(d.path().join("unreviewed/empty")).unwrap();
 
@@ -1058,10 +1065,10 @@ mod tests {
         assert!(d.path().join(".cache/index.ron").exists());
         let id = id_of(&l, "a-1");
         // external edit: change the title with a different tool → mtime/size change
-        let mp4 = d.path().join("unreviewed/a-1/a-1.mp4");
-        let mut m = media::read_meta(&mp4).unwrap();
+        let mp3 = d.path().join("unreviewed/a-1/a-1.mp3");
+        let mut m = media::read_meta(&mp3).unwrap();
         m.title = Some("edited elsewhere, a much longer title".into());
-        media::write_meta(&mp4, &m).unwrap();
+        media::write_meta(&mp3, &m).unwrap();
         // external move
         std::fs::rename(
             d.path().join("unreviewed/a-1"),
@@ -1094,7 +1101,7 @@ mod tests {
             s.dir.as_deref(),
             Some(d.path().join("reviewed/good/a-1").as_path())
         );
-        assert_eq!(media::read_meta(&s.mp4).unwrap().rating, Some(Rating::Good));
+        assert_eq!(media::read_meta(&s.mp3).unwrap().rating, Some(Rating::Good));
         assert!(s.wav.is_some());
         assert_unit(&s);
         assert!(!d.path().join("unreviewed/a-1").exists());
@@ -1107,7 +1114,7 @@ mod tests {
         l.unreview(&id).unwrap();
         let s = l.get(&id).unwrap().clone();
         assert_eq!(s.location, Location::Unreviewed);
-        assert_eq!(media::read_meta(&s.mp4).unwrap().rating, None);
+        assert_eq!(media::read_meta(&s.mp3).unwrap().rating, None);
 
         l.undo().unwrap(); // back to bad
         assert_eq!(
@@ -1115,14 +1122,14 @@ mod tests {
             Location::Reviewed(Rating::Bad)
         );
         assert_eq!(
-            media::read_meta(&l.get(&id).unwrap().mp4).unwrap().rating,
+            media::read_meta(&l.get(&id).unwrap().mp3).unwrap().rating,
             Some(Rating::Bad)
         );
         l.undo().unwrap(); // back to good
         l.undo().unwrap(); // back to unreviewed
         let s = l.get(&id).unwrap();
         assert_eq!(s.location, Location::Unreviewed);
-        assert_eq!(media::read_meta(&s.mp4).unwrap().rating, None);
+        assert_eq!(media::read_meta(&s.mp3).unwrap().rating, None);
         assert!(!l.can_undo());
     }
 
@@ -1188,9 +1195,9 @@ mod tests {
     }
 
     #[test]
-    fn loose_mp4_gets_wrapped_on_move() {
+    fn loose_mp3_gets_wrapped_on_move() {
         let (d, mut l) = lib();
-        std::fs::copy(TINY, d.path().join("reviewed/bad/loose-9.mp4")).unwrap();
+        std::fs::copy(TINY, d.path().join("reviewed/bad/loose-9.mp3")).unwrap();
         l.scan().unwrap();
         let id = id_of(&l, "loose-9");
         l.rate(&id, Rating::Good).unwrap();
@@ -1200,7 +1207,7 @@ mod tests {
             Some(d.path().join("reviewed/good/loose-9").as_path())
         );
         assert_unit(s);
-        assert!(!d.path().join("reviewed/bad/loose-9.mp4").exists());
+        assert!(!d.path().join("reviewed/bad/loose-9.mp3").exists());
     }
 
     #[test]
@@ -1213,7 +1220,7 @@ mod tests {
             .unwrap();
         l.set_notes(&id, "note").unwrap();
         l.set_title(&id, "T").unwrap();
-        let m = media::read_meta(&l.get(&id).unwrap().mp4).unwrap();
+        let m = media::read_meta(&l.get(&id).unwrap().mp3).unwrap();
         assert_eq!(m.tags, vec!["x", "y"]);
         assert_eq!(m.comment.as_deref(), Some("note"));
         assert_eq!(m.title.as_deref(), Some("T"));
@@ -1232,10 +1239,10 @@ mod tests {
         assert_eq!(stem, "a-1-2", "exists in reviewed/good");
         let (stem2, _p2) = l.reserve("a-1").unwrap();
         assert_eq!(stem2, "a-1-3", "reservations count");
-        std::fs::copy(TINY, part.join(format!("{stem}.mp4"))).unwrap();
+        std::fs::copy(TINY, part.join(format!("{stem}.mp3"))).unwrap();
         let delta = l.commit(&stem, &part).unwrap();
         assert_eq!(delta.upserted[0].stem, "a-1-2");
-        assert!(d.path().join("unreviewed/a-1-2/a-1-2.mp4").exists());
+        assert!(d.path().join("unreviewed/a-1-2/a-1-2.mp3").exists());
         assert!(!part.exists());
         let (r, _) = l.reserve_regen("a-1").unwrap();
         assert_eq!(r, "a-1-r2");
@@ -1256,9 +1263,9 @@ mod tests {
             .export(std::slice::from_ref(&id), &dest, ExportFormat::Wav, false)
             .unwrap();
         assert_eq!(out2[0], dest.join("a-1-2.wav"));
-        let mp4 = l.export(&[id], &dest, ExportFormat::Mp4, true).unwrap();
+        let mp3 = l.export(&[id], &dest, ExportFormat::Mp3, true).unwrap();
         assert!(
-            media::read_meta(&mp4[0]).unwrap().recipe.is_none(),
+            media::read_meta(&mp3[0]).unwrap().recipe.is_none(),
             "stripped"
         );
     }

@@ -1,7 +1,7 @@
 //! Test support: a mock audio.cpp server and a harness around `CoreHandle`.
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use audiocpp_core::config::{
-    Config, Encoder, Extension, LibraryConfig, ModelSpec, Models, ServerConfig, TerminalMode,
+    Config, Encoder, LibraryConfig, ModelSpec, Models, ServerConfig, TerminalMode,
 };
 use audiocpp_core::run::JobId;
 use audiocpp_core::scheduler::{JobInfo, JobState, RunSnapshot, ServerId};
@@ -81,6 +81,10 @@ pub struct MockState {
     pub crash_next: AtomicBool,
     pub dead: AtomicBool,
     pub uploads: Mutex<Vec<PathBuf>>,
+    /// Paths `/v1/ui/path-status` reports as absent; every other path exists.
+    pub missing_paths: Mutex<BTreeSet<String>>,
+    /// Answer 404 to `/v1/ui/*`, like a server started without `--ui-management`.
+    pub no_ui_management: AtomicBool,
     pub upload_dir: PathBuf,
     pub gen_count: AtomicU32,
     /// Generation requests currently in flight.
@@ -175,6 +179,19 @@ async fn upload(State(st): S, headers: HeaderMap, body: Bytes) -> Response {
     st.uploads.lock().push(path.clone());
     st.call("upload");
     axum::Json(json!({"path": path, "bytes": body.len()})).into_response()
+}
+
+/// Not recorded in `calls`: it isn't a model or task call.
+async fn path_status(State(st): S, axum::Json(body): axum::Json<Value>) -> Response {
+    check_alive(&st);
+    if st.no_ui_management.load(Ordering::SeqCst) {
+        return (StatusCode::NOT_FOUND, "ui management disabled").into_response();
+    }
+    let path = body["path"].as_str().unwrap_or_default();
+    let exists = !st.missing_paths.lock().contains(path);
+    let file = exists && path.ends_with(".gguf");
+    axum::Json(json!({"exists": exists, "directory": exists && !file, "file": file}))
+        .into_response()
 }
 
 struct InFlight<'a>(&'a MockState);
@@ -278,6 +295,7 @@ impl MockServer {
             .route("/v1/models/load", post(load))
             .route("/v1/models/unload", post(unload))
             .route("/v1/ui/upload", post(upload))
+            .route("/v1/ui/path-status", post(path_status))
             .route("/v1/tasks/run", post(run))
             .layer(axum::extract::DefaultBodyLimit::disable())
             .with_state(state.clone());
@@ -344,8 +362,7 @@ pub fn config(root: &Path, ports: &[u16]) -> Config {
         },
         library: LibraryConfig {
             root: root.to_path_buf(),
-            encoder: Encoder::Aac { bitrate_kbps: 128 },
-            extension: Extension::Mp4,
+            encoder: Encoder::Cbr { bitrate_kbps: 128 },
         },
         defaults: None,
     }
@@ -365,11 +382,14 @@ pub struct Harness {
 
 impl Harness {
     pub fn start(cfg: Config) -> Harness {
+        // a private run dir: the default one may hold a real app's pidfiles for `gpu1`
+        let run_dir = cfg.library.root.join(".run");
         Self::start_with(
             cfg,
             CoreOptions {
                 no_autostart: true,
                 poll: Some(Duration::from_millis(200)),
+                run_dir: Some(run_dir),
                 ..Default::default()
             },
         )

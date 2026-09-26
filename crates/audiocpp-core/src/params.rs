@@ -256,9 +256,6 @@ impl GenerationParams {
 
     pub fn validate(&self) -> Vec<String> {
         let mut p = Vec::new();
-        if self.lyrics.trim().is_empty() {
-            p.push("lyrics are empty".into());
-        }
         if self.style.trim().is_empty() {
             p.push("style is empty".into());
         }
@@ -396,10 +393,9 @@ mod tests {
     #[test]
     fn validation() {
         let mut p = GenerationParams::default();
-        assert!(p.validate().iter().any(|m| m.contains("lyrics")));
-        p.lyrics = "x".into();
+        assert_eq!(p.validate(), vec!["style is empty".to_string()]);
         p.style = "y".into();
-        assert!(p.validate().is_empty());
+        assert!(p.validate().is_empty(), "empty lyrics are allowed");
         p.abc_sampling.min_tokens = 10_000;
         assert_eq!(
             p.validate(),

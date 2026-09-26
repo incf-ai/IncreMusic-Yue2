@@ -9,7 +9,7 @@ use audiocpp_core::Command;
 use audiocpp_core::config::{Launch, TerminalMode};
 use audiocpp_core::launcher;
 use audiocpp_core::scheduler::ServerId;
-use audiocpp_core::service::{CoreOptions, Event, ServerState};
+use audiocpp_core::service::{CoreOptions, Event, LogLevel, ServerState};
 use common::{Harness, config};
 
 const STUB: &str = concat!(
@@ -165,6 +165,119 @@ fn servers_that_appear_later_are_attached() {
     assert_eq!(h.servers[&ServerId(0)], ServerState::Stopped);
     let _mock = common::MockServer::start_on("late", port);
     h.wait_ready(1);
+    h.core.shutdown(false);
+}
+
+fn terminal_config(
+    lib: &std::path::Path,
+    port: u16,
+    template: &[&str],
+) -> audiocpp_core::config::Config {
+    let mut cfg = config(lib, &[port]);
+    cfg.server_binary = Some(PathBuf::from(STUB));
+    cfg.terminal = TerminalMode::Command(template.iter().map(|s| s.to_string()).collect());
+    cfg.servers[0].launch = Some(Launch {
+        backend: "stub".into(),
+        device: None,
+        extra_args: vec![],
+        autostart: false,
+    });
+    cfg
+}
+
+fn start(cfg: audiocpp_core::config::Config, run_dir: &std::path::Path) -> Harness {
+    Harness::start_with(
+        cfg,
+        CoreOptions {
+            run_dir: Some(run_dir.to_path_buf()),
+            no_autostart: true,
+            poll: Some(Duration::from_millis(200)),
+            ..Default::default()
+        },
+    )
+}
+
+/// e.g. `gio launch` with no terminal emulator installed: its error is logged and the
+/// server is down right away instead of after the 60 s startup timeout.
+#[cfg(unix)]
+#[test]
+fn failing_terminal_opener_is_logged() {
+    let lib = tempfile::tempdir().unwrap();
+    let run_dir = tempfile::tempdir().unwrap();
+    let cfg = terminal_config(
+        lib.path(),
+        free_port(),
+        &[
+            "/bin/sh",
+            "-c",
+            "echo 'Unable to find terminal' >&2; exit 1",
+        ],
+    );
+    let mut h = start(cfg, run_dir.path());
+    let id = ServerId(0);
+    h.send(Command::LaunchServer(id));
+    h.until("down", Duration::from_secs(5), |h| {
+        matches!(h.servers.get(&id), Some(ServerState::Down(r)) if r.contains("Unable to find terminal"))
+    });
+    assert!(h.events.iter().any(|e| matches!(e, Event::Log(l)
+        if l.level == LogLevel::Error && l.source == "gpu1" && l.message.contains("Unable to find terminal"))));
+    h.core.shutdown(false);
+}
+
+/// Output of a server running in a terminal reaches the log through its log file.
+#[cfg(unix)]
+#[test]
+fn terminal_server_output_is_logged() {
+    if !has_python() {
+        eprintln!("skipping: python3 not found");
+        return;
+    }
+    let lib = tempfile::tempdir().unwrap();
+    let run_dir = tempfile::tempdir().unwrap();
+    let cfg = terminal_config(lib.path(), free_port(), &["/bin/sh", "{script}"]);
+    let mut h = start(cfg, run_dir.path());
+    let id = ServerId(0);
+    h.send(Command::LaunchServer(id));
+    h.until("output logged", Duration::from_secs(20), |h| {
+        h.events.iter().any(|e| {
+            matches!(e, Event::Log(l)
+            if l.output && l.source == "gpu1" && l.message.starts_with("stub: listening on"))
+        })
+    });
+    assert!(run_dir.path().join("gpu1.log").is_file());
+    h.until("ready", Duration::from_secs(20), |h| {
+        h.servers.get(&id).is_some_and(|s| s.is_up())
+    });
+    h.send(Command::StopServer(id));
+    h.until("stopped", Duration::from_secs(20), |h| {
+        h.servers.get(&id) == Some(&ServerState::Stopped)
+    });
+    // the last words before exiting are in the log too
+    assert!(h.events.iter().any(|e| matches!(e, Event::Log(l)
+        if l.output && l.message.contains("got signal"))));
+    h.core.shutdown(false);
+}
+
+/// Errors from the launcher script itself (here a bad `working_dir`) reach the log.
+#[cfg(unix)]
+#[test]
+fn launcher_script_errors_are_logged() {
+    let lib = tempfile::tempdir().unwrap();
+    let run_dir = tempfile::tempdir().unwrap();
+    let mut cfg = terminal_config(lib.path(), free_port(), &["/bin/sh", "{script}"]);
+    cfg.working_dir = Some(PathBuf::from("/nonexistent/audiocpp"));
+    let mut h = start(cfg, run_dir.path());
+    let id = ServerId(0);
+    h.send(Command::LaunchServer(id));
+    h.until("cd error logged", Duration::from_secs(10), |h| {
+        h.events.iter().any(|e| {
+            matches!(e, Event::Log(l)
+            if l.output && l.message.contains("/nonexistent/audiocpp"))
+        })
+    });
+    h.until("down", Duration::from_secs(10), |h| {
+        matches!(h.servers.get(&id), Some(ServerState::Down(_)))
+    });
     h.core.shutdown(false);
 }
 
