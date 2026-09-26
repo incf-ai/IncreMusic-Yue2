@@ -1,4 +1,4 @@
-# audiocpp-ui — Design Document
+# audiocpp music ui — Design Document
 
 Status: **Draft** · 2026-09-23
 

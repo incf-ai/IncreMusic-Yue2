@@ -1,4 +1,4 @@
-//! `audiocpp-ui`: batch song generation with audio.cpp servers.
+//! audiocpp music ui (`audiocpp-ui`): batch song generation with audio.cpp servers.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,7 +37,7 @@ fn main() -> eframe::Result<()> {
         .unwrap_or_else(|| PathBuf::from("config.ron"));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("audiocpp-ui")
+            .with_title("audiocpp music ui")
             .with_inner_size([1280.0, 860.0])
             // .abc and audio files can be dropped onto the Generate panel (§5.2)
             .with_drag_and_drop(true),

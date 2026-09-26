@@ -1,4 +1,4 @@
-# audiocpp-ui — Current Status
+# audiocpp music ui — Current Status
 
 Status as of 2026-09-24, measured against [DESIGN.md](DESIGN.md).
 

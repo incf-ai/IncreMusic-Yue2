@@ -1,4 +1,4 @@
-// audiocpp-ui configuration (docs/DESIGN.md §3). Struct names are required.
+// audiocpp music ui configuration (docs/DESIGN.md §3). Struct names are required.
 // Copy to ~/.config/audiocpp-ui/config.ron (Linux), or pass --config <path>.
 Config(
     server_binary: "/mnt/storage/audiocpp/audiocpp_server",
