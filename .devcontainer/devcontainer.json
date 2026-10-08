@@ -1,5 +1,5 @@
 {
-	"name": "audiocpp-ui",
+	"name": "incremusic-yue2",
 	"build": {
 		"dockerfile": "Dockerfile"
 	},
@@ -18,7 +18,7 @@
 		"PULSE_SERVER": "unix:/tmp/pulse-native"
 	},
 	"runArgs": [
-		"--name=devcontainer-audiocpp-ui",
+		"--name=devcontainer-incremusic-yue2",
 		"--network=host",
 		"--memory=32g",
 		"--cpus=8",

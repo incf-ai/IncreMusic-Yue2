@@ -1,5 +1,5 @@
-// audiocpp music ui configuration (docs/DESIGN.md §3). Struct names are required.
-// Copy to ~/.config/audiocpp-ui/config.ron (Linux), or pass --config <path>.
+// IncreMusic-Yue2 configuration (docs/DESIGN.md §3). Struct names are required.
+// Copy to ~/.config/incremusic-yue2/config.ron (Linux), or pass --config <path>.
 Config(
     server_binary: "/mnt/storage/audiocpp/audiocpp_server",
     working_dir: "/mnt/storage/audiocpp",

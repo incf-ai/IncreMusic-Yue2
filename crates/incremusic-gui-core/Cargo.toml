@@ -1,0 +1,18 @@
+[package]
+name = "incremusic-gui-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+incremusic-core.workspace = true
+rand.workspace = true
+serde_json.workspace = true
+ulid.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+
+[lints]
+workspace = true

@@ -1,4 +1,4 @@
-# audiocpp music ui — Current Status
+# IncreMusic-Yue2 — Current Status
 
 Status as of 2026-09-24, measured against [DESIGN.md](DESIGN.md).
 
@@ -19,7 +19,7 @@ optional. The gaps are listed below.
 | Item | Design | Notes |
 |---|---|---|
 | Model file hashes in the recipe | §6.2 | `model.file_hashes` is always empty. The design marks it optional. |
-| GUI image snapshot tests | §9.3 | Not added. The design marks them optional and off in CI. |
+| GUI image snapshot tests | §9.3 | Not added. The design marks them optional and off by default. |
 
 ## Partly implemented, or changed from the design
 
@@ -47,21 +47,20 @@ optional. The gaps are listed below.
 
 ## Real-server tests
 
-`crates/audiocpp-core/tests/real_server.rs` passed on 2026-09-24 against audio.cpp v0.8.2
+`crates/incremusic-core/tests/real_server.rs` passed on 2026-09-24 against audio.cpp v0.8.2
 (Vulkan, AMD Radeon AI PRO R9700). `generates_one_short_song` covers the API client, and
 `generates_one_song_through_the_core` covers the whole pipeline: attach, model path check,
 scheduler, MP4 encoding, recipe and library. `transcribes_through_the_core` turned a
 generated AAC song into ABC in 29 s. That covered WAV conversion, upload, SheetSage2, the
 project files, and unloading SheetSage2 afterwards. That run predates the switch of the
 library format from MP4/AAC to MP3/ID3 (2026-09-25) and has not been repeated since. To run them:
-`AUDIOCPP_SERVER_URL=http://127.0.0.1:9123 cargo test -p audiocpp-core --test real_server -- --ignored`
+`AUDIOCPP_SERVER_URL=http://127.0.0.1:9123 cargo test -p incremusic-core --test real_server -- --ignored`
 
 ## Written, but never run
 
 - **Native terminal launch test** (`native_launch_opens_a_terminal`): needs a desktop
   session.
-- **Windows and macOS:** the CI workflow (`.github/workflows/ci.yml`) has never run. Only
-  Linux has been tested, so some tests may need fixes on other platforms.
+- **Windows and macOS:** never built or tested. Only Linux has been tested, so some tests may need fixes on other platforms.
 
 ## Things to know
 

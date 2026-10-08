@@ -1,4 +1,4 @@
-# audiocpp music ui — Design Document
+# IncreMusic-Yue2 — Design Document
 
 Status: **Draft** · 2026-09-23
 
@@ -39,8 +39,8 @@ organizing the results. It:
 - Remote or multi-user servers. Only local servers on `127.0.0.1` are assumed.
 - Editing ABC or lyrics beyond a plain text box.
 - Platform-specific polish beyond launching and paths. The app **is cross-platform**
-  (Linux, Windows, macOS). Linux is the main target for testing, and Windows and macOS get
-  CI build and unit-test coverage.
+  (Linux, Windows, macOS). Linux is the main target for testing; Windows and macOS are
+  untested.
 
 ---
 
@@ -107,10 +107,10 @@ read). See section 5.2 for the conversion and where the files are kept.
 1. `POST /v1/ui/upload`
    - Body: the raw bytes of the WAV. The headers are always the same (as captured):
      `Content-Type: audio/vnd.wave` and `x-audiocpp-filename: upload.wav`.
-   - Response: `{"path":"/tmp/audiocpp-ui-…/1-upload.wav","bytes":47054892}`.
+   - Response: `{"path":"/tmp/incremusic-yue2-…/1-upload.wav","bytes":47054892}`.
 2. `POST /v1/tasks/run`:
    ```json
-   {"model":"sheetsage2","request":{"audio":"/tmp/audiocpp-ui-…/1-upload.wav","options":{}}}
+   {"model":"sheetsage2","request":{"audio":"/tmp/incremusic-yue2-…/1-upload.wav","options":{}}}
    ```
 3. Response (took about 10.5 s for a 4.4-minute track):
    ```jsonc
@@ -200,38 +200,38 @@ source of truth, and log a warning if the two disagree. In the two runs seen, a
 The current single-package `Cargo.toml` becomes a workspace:
 
 ```
-audiocpp-ui/
+incremusic-yue2/
 ├── Cargo.toml                 # [workspace]
 ├── crates/
-│   ├── audiocpp-core/         # logic, network, process, media, library: no GUI deps
-│   ├── audiocpp-gui-core/     # GUI state machine / view-model: no egui rendering
-│   └── audiocpp-gui/          # egui/eframe widgets + the binary `audiocpp-ui`
+│   ├── incremusic-core/       # logic, network, process, media, library: no GUI deps
+│   ├── incremusic-gui-core/   # GUI state machine / view-model: no egui rendering
+│   └── incremusic-gui/        # egui/eframe widgets + the binary `incremusic-yue2`
 ├── tests/fixtures/            # trimmed HAR-derived request/response fixtures
 └── docs/DESIGN.md
 ```
 
 ```
-            ┌────────────────────┐
-            │   audiocpp-gui     │  eframe app, egui widgets, audio output device
-            │   (bin + lib)      │  headless tests: egui_kittest + AccessKit
-            └─────────┬──────────┘
-                      │ renders AppState, emits UiAction
-            ┌─────────▼──────────┐
-            │ audiocpp-gui-core  │  AppState, UiAction → reducer → Commands,
-            │   (lib)            │  selection/review queue, form validation
-            └─────────┬──────────┘
-                      │ Command / Event channels
-            ┌─────────▼──────────┐
-            │  audiocpp-core     │  config, launcher, api client, scheduler,
-            │   (lib, tokio)     │  media encode/metadata, library (fs), playback decode
-            └────────────────────┘
+            ┌──────────────────────┐
+            │   incremusic-gui     │  eframe app, egui widgets, audio output device
+            │   (bin + lib)        │  headless tests: egui_kittest + AccessKit
+            └──────────┬───────────┘
+                       │ renders AppState, emits UiAction
+            ┌──────────▼───────────┐
+            │ incremusic-gui-core  │  AppState, UiAction → reducer → Commands,
+            │   (lib)              │  selection/review queue, form validation
+            └──────────┬───────────┘
+                       │ Command / Event channels
+            ┌──────────▼───────────┐
+            │  incremusic-core     │  config, launcher, api client, scheduler,
+            │   (lib, tokio)       │  media encode/metadata, library (fs), playback decode
+            └──────────────────────┘
 ```
 
 **Dependency rule:** `core` must not depend on `gui-core` or `gui`, and `gui-core` must not
 depend on `egui`. Everything above `core` talks to it only through a `CoreHandle`
 (section 2.3).
 
-### 2.2 `audiocpp-core` modules
+### 2.2 `incremusic-core` modules
 
 | Module | Responsibility |
 |---|---|
@@ -306,8 +306,8 @@ No long-running operation may run on, or wait on, the UI thread. Concretely:
 ## 3. Configuration (RON)
 
 - Location: the platform config directory from `directories::ProjectDirs`:
-  `$XDG_CONFIG_HOME/audiocpp-ui/config.ron` on Linux, `%APPDATA%\audiocpp-ui\config.ron`
-  on Windows, and `~/Library/Application Support/audiocpp-ui/config.ron` on macOS.
+  `$XDG_CONFIG_HOME/incremusic-yue2/config.ron` on Linux, `%APPDATA%\incremusic-yue2\config.ron`
+  on Windows, and `~/Library/Application Support/incremusic-yue2/config.ron` on macOS.
   Override it with `--config <path>`.
 - Parsing enables **every RON extension**:
   ```rust
@@ -369,7 +369,7 @@ Config(
     ),
 
     library: Library(
-        root: "~/Music/audiocpp",               // unreviewed/, reviewed/{good,neutral,bad}/
+        root: "~/Music/incremusic",               // unreviewed/, reviewed/{good,neutral,bad}/
         encoder: Vbr(quality: 0),               // LAME -V0..9; or: Cbr(bitrate_kbps: 320)
         // file names are always "<run name>-<seed>" (section 5.1.1)
     ),
@@ -401,13 +401,13 @@ terminal" mechanism, so no terminal emulator has to be named in config.
 |---|---|
 | `Native` **(default)** | Platform-native launcher (section 4.1.1) |
 | `Command([...])` | Override on any OS: spawns a user-given terminal argv. `{script}` expands to the launcher script path and `{name}` to the server name. Example: `["kitty", "--title", "{name}", "--", "{script}"]` |
-| `Headless` | Runs the process directly with no terminal and pipes stdout/stderr into the in-app log view. Used by tests and CI |
+| `Headless` | Runs the process directly with no terminal and pipes stdout/stderr into the in-app log view. Used by tests |
 
 Every mode starts from the same generated **launcher script**. The script records its PID
 and then `exec`s the server (section 4.2), so PID tracking works the same way everywhere.
 Scripts and launchers are written to a per-user runtime directory (`directories` crate:
-`$XDG_RUNTIME_DIR/audiocpp-ui/` on Linux, `%LOCALAPPDATA%\audiocpp-ui\run\` on Windows,
-`~/Library/Caches/audiocpp-ui/run/` on macOS).
+`$XDG_RUNTIME_DIR/incremusic-yue2/` on Linux, `%LOCALAPPDATA%\incremusic-yue2\run\` on Windows,
+`~/Library/Caches/incremusic-yue2/run/` on macOS).
 
 #### 4.1.1 Native launchers
 
@@ -424,7 +424,7 @@ rules):
 [Desktop Entry]
 Type=Application
 Name=audiocpp gpu1 (:9123)
-Exec=/run/user/1000/audiocpp-ui/gpu1.sh
+Exec=/run/user/1000/incremusic-yue2/gpu1.sh
 Path=/opt/audiocpp
 Terminal=true
 NoDisplay=true
@@ -453,9 +453,9 @@ and `exec`s the server, so the PID in the file *is* the server:
 
 ```sh
 #!/bin/sh
-# generated by audiocpp-ui — gpu1
+# generated by incremusic-yue2 — gpu1
 printf '\033]0;%s\007' "audiocpp gpu1 :9123"
-echo $$ > "/run/user/1000/audiocpp-ui/gpu1.pid"
+echo $$ > "/run/user/1000/incremusic-yue2/gpu1.pid"
 cd "/opt/audiocpp"
 exec ./audiocpp_server --ui --ui-management --backend vulkan --device 1 --log --port 9123
 ```
@@ -712,12 +712,20 @@ Project(
         upload_file: Some("reference.upload.wav"),   // None → the original was uploaded
         upload_sha256: "…",
         conversion: Some("ffmpeg 7.1 -c:a pcm_s16le"),
+        added_at: "2026-09-23T21:40:05Z",   // when copied in; older projects fall back to created_at
     )),
     transcription: Some(Transcription(
         file: "transcription.abc", model: "sheetsage2", created_at: "…", wall_ms: 10513,
     )),
     abc: Some(AbcFile(file: "sunny-hook.abc", source: Transcribed)), // File(original_name) / Manual
     runs: ["01J8…", "01J9…"],               // run ids that used this project
+    keypoints: Keypoints(                    // review keypoints (section 7.3.1)
+        points: [
+            Keypoint(at_ms: 65500, name: "chorus", preroll_ms: None),  // None → default
+            Keypoint(at_ms: 131000, name: "", preroll_ms: Some(500)),
+        ],
+        preroll_ms: 2000,                    // default pre-roll
+    ),
 )
 ```
 
@@ -808,10 +816,10 @@ untouched. The song length comes from the stream's Xing/LAME header.
 |---|---|
 | `TIT2` (title) | Defaults to `"<run name>-<seed>"`, which is the same as the file name. Can be edited in review |
 | `COMM` (comment, empty description) | User notes |
-| `TSSE` (encoder) | `audiocpp-ui {version}` |
-| `TXXX:org.audiocpp-ui:recipe` | **Reproducibility record** as JSON (below) |
-| `TXXX:org.audiocpp-ui:tags` | JSON array of user tags |
-| `TXXX:org.audiocpp-ui:rating` | `"good"`, `"neutral"`, or `"bad"` (also implied by folder; the frame wins if the file is moved by hand) |
+| `TSSE` (encoder) | `incremusic-yue2 {version}` |
+| `TXXX:org.incremusic-yue2:recipe` | **Reproducibility record** as JSON (below) |
+| `TXXX:org.incremusic-yue2:tags` | JSON array of user tags |
+| `TXXX:org.incremusic-yue2:rating` | `"good"`, `"neutral"`, or `"bad"` (also implied by folder; the frame wins if the file is moved by hand) |
 
 **Recipe record** (the JSON embedded in the MP3):
 
@@ -894,8 +902,9 @@ the original.
 | Tag | Adds or removes free-form tags with autocomplete from tags already in the library |
 | Notes | Writes `COMM` |
 | Rate good / neutral / bad | Writes the rating frame and **moves** the song folder to `reviewed/<rating>/`. Re-rating moves it between rating folders. "Unreview" moves it back |
-| Export | Copies to a chosen folder as MP3, WAV, or FLAC. **MP3 is the library file itself** (no re-encode). **WAV is copied from the master**, so it is lossless. FLAC is encoded **from the master**, never from the MP3. Metadata can optionally be stripped. Many songs can be exported at once |
+| Export | Copies to a chosen folder as MP3, WAV, or FLAC. **MP3 is the library file itself** (no re-encode). **WAV is copied from the master**, so it is lossless. FLAC is encoded **from the master**, never from the MP3. Metadata can optionally be stripped. Unless it is, an MP3 also carries its project's keypoints (§7.3.1) as ID3 chapters (`CHAP` frames in time order, each running to the next or the song's end, under one `CTOC`; keypoints past the end are left out) and as JSON in a `keypoints` TXXX that keeps list order and pre-rolls. Many songs can be exported at once |
 | Regenerate | Section 6.2 |
+| View lyrics | Opens the song's recipe lyrics in a popup that follows the selected song. `L` also opens it, and `L` or `Esc` closes it. *Copy* puts the lyrics on the clipboard |
 | Delete | Moves the song folder to the system trash (`trash` crate), never a hard delete |
 
 All moves happen in `core::library` and are atomic (a directory `rename` within one
@@ -913,15 +922,38 @@ the place in the queue is kept. A song playing from another tab is left alone un
 `Space` switches to the review song. *Restart review* starts over from the oldest
 unreviewed song.
 
+Once every song is reviewed, the next one to arrive becomes the review song and plays at
+once. Unticking *Autoplay new songs* leaves it waiting for `Space` instead.
+
 | Key | Action |
 |---|---|
 | `Space` | Play / pause |
 | `←` / `→` | Seek ±5 s (`Shift`: ±30 s) |
 | `1` / `2` / `3` | Rate good / neutral / bad, then go to the next song |
+| `C` | Rate bad like `3`, but if the song has played for less than 30 s in total (seeks don't count) ask first |
 | `N` / `P` | Next / previous song without rating |
 | `T` | Focus the tag field |
 | `R` | Focus the rename field |
-| `L` | Show / hide the lyrics popup. It follows the review song, and the keys above keep working while it is open. `Esc` also closes it |
+| `L` | Show / hide the lyrics popup. It follows the review song, and the keys above keep working while it is open. `Esc` also closes it, and *Copy* puts the lyrics on the clipboard |
+| `X` | Review the next keypoint |
+| `Z` | Review the previous keypoint |
+
+#### 7.3.1 Keypoints
+
+A pane at the right of the Review tab holds the review song's project's **keypoints**:
+moments worth checking in every song of the project (the chorus, a tricky line), kept in
+`project.ron`. All songs of a project share them, as fixed times.
+
+- *Add at playhead* adds one at the current position, after the others. Each has a time
+  (drag it, or type `m:ss.s`), an optional name, and an optional pre-roll of its own.
+  The *Default pre-roll* field below the list covers the rest.
+- They play in list order, not time order. The ↑ / ↓ buttons rearrange them.
+- *Review next keypoint* (`X`) seeks to the next keypoint less its pre-roll and plays on
+  from there. The keypoint played last is highlighted. Nothing happens after the last
+  one. `Z` goes back one, and ▶ on a row plays that one. Each new review song
+  starts from the top. If the song hasn't loaded yet, the seek waits for it.
+- Adding, removing, moving and resetting a pre-roll save at once. Dragging saves on
+  release, and typing saves when the field loses focus.
 
 ---
 
@@ -990,7 +1022,7 @@ labels.
 - `gui-core`: the `update()` reducer: the right `Command`s for each `UiAction`, review
   navigation, and form validation.
 
-### 9.2 Integration tests (`crates/audiocpp-core/tests/`)
+### 9.2 Integration tests (`crates/incremusic-core/tests/`)
 
 - A **mock audio.cpp server** (`axum` on an ephemeral port) that serves the fixture
   responses. It can inject delay, errors, and a mid-job crash. Tests cover:
@@ -1041,7 +1073,7 @@ labels.
 audio payload. The HAR files themselves are 0.3 MB and 555 MB and are **not committed**.
 Add `*.har` to `.gitignore`.
 
-### 9.3 Headless GUI tests (`crates/audiocpp-gui/tests/`)
+### 9.3 Headless GUI tests (`crates/incremusic-gui/tests/`)
 
 These use **`egui_kittest`**, which drives the real egui app headlessly and finds widgets
 through the **AccessKit** tree (`harness.get_by_label("Start run").click()`). The core is
@@ -1062,7 +1094,7 @@ Scenarios:
 - The UI stays responsive: with a fake `CoreHandle` that never answers, every panel still
   renders and accepts input, and no frame waits on the core (section 2.3.1).
 - Optional image snapshots (`egui_kittest` `snapshot` feature + wgpu) for layout
-  regressions. These are off by default in CI.
+  regressions. These are off by default.
 
 ---
 

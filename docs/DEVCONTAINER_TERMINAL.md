@@ -1,6 +1,6 @@
 # Opening server terminals from the dev container
 
-With `terminal: Native`, audiocpp-ui starts each server by running
+With `terminal: Native`, incremusic-yue2 starts each server by running
 `gio launch <run dir>/<name>.desktop`. That `.desktop` file has `Terminal=true`, so `gio` has to
 find a terminal emulator to run the launcher script in. The dev container image has no terminal
 emulator, so the launch fails:
@@ -63,10 +63,10 @@ In the rebuilt container:
 
 ```sh
 command -v xterm x-terminal-emulator                      # both should print a path
-gio launch ~/.cache/audiocpp-ui/run/gpu1.desktop          # should open an xterm running gpu1
+gio launch ~/.cache/incremusic-yue2/run/gpu1.desktop          # should open an xterm running gpu1
 ```
 
-(`~/.cache/audiocpp-ui/run/` is the run directory used when `XDG_RUNTIME_DIR` is unset, as it
+(`~/.cache/incremusic-yue2/run/` is the run directory used when `XDG_RUNTIME_DIR` is unset, as it
 is in the container. The `.desktop` files are there once the app has tried to launch a server
 at least once.)
 

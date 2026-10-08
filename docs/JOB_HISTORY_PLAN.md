@@ -14,7 +14,7 @@ reuses Phase 1's form-filling code for runs loaded from disk.
 
 ## Phase 1: Load into Generate from the Queue
 
-A small, self-contained change in `audiocpp-gui-core` and the Queue view. It doesn't touch
+A small, self-contained change in `incremusic-gui-core` and the Queue view. It doesn't touch
 the core.
 
 - **Button:** each Queue row gets **Load into Generate** (icon `ph::ARROW_SQUARE_IN`),
@@ -120,7 +120,7 @@ RunRecord(
 
 ### 2. When records are written (core, Phase 2)
 
-All writes go through a new `RunHistory` store in `audiocpp-core` (a new
+All writes go through a new `RunHistory` store in `incremusic-core` (a new
 `history.rs`, next to `project.rs`) and run on the blocking pool:
 
 | Event | Hook | Write |
@@ -167,7 +167,7 @@ New commands and events, next to the existing `Regenerate`/`Recipe` ones:
   file**.
 - The Queue's **Clear finished runs** only removes runs from the live queue. Their records
   stay in History, and the confirmation text says so.
-- The actions go into `audiocpp-gui-core` as `UiAction`s so the headless tests can drive
+- The actions go into `incremusic-gui-core` as `UiAction`s so the headless tests can drive
   them.
 
 ### 5. Optional follow-ups (not part of the first version)
@@ -190,7 +190,7 @@ New commands and events, next to the existing `Regenerate`/`Recipe` ones:
   mid-run, let one seed fail. The record should show 2 revisions and the right seed
   outcomes, and `LoadRun` should return revision 1's params.
 - Stop a run before any job finishes. The record should still exist and reload.
-- `audiocpp-gui-core` tests: `RunLoaded` fills the form, keeps the name, and triggers the
+- `incremusic-gui-core` tests: `RunLoaded` fills the form, keeps the name, and triggers the
   collision check. A new form stays unchanged.
 - The real-server test `generates_one_song_through_the_core` also asserts that the record
   was written.
@@ -207,7 +207,7 @@ New commands and events, next to the existing `Regenerate`/`Recipe` ones:
 ## As built
 
 - **Code:**
-  - **Core:** `audiocpp-core/src/history.rs`, which has `RunHistory`, `RunRecord` and
+  - **Core:** `incremusic-core/src/history.rs`, which has `RunHistory`, `RunRecord` and
     `Recorder`. `Recorder` wraps the scheduler's event sink, so every run and job update
     is recorded in one place. It doesn't hook into each command.
   - **Commands and events:** `Command::ListRuns`, `LoadRunRecord` and

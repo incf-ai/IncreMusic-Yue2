@@ -1,4 +1,10 @@
-# audiocpp music ui
+Human generated note:
+
+I made this program with the intent of speeding up the process of making, reviewing, keeping track of, etc. song covers with the yue2 music model and the sheetsage2 transcription model. It supports using multiple GPUs (multiple audio.cpp servers) simultaniously.
+
+Machine generated below:
+
+# IncreMusic-Yue2
 
 Desktop app (Rust, egui) for batch song generation with one or more
 [audio.cpp](docs/DESIGN.md#1-background-the-audiocpp-server-api) servers: launch servers,
@@ -31,19 +37,19 @@ paused, stopped, edited, reordered, or loaded back into Generate.
 
 ### History
 
-Every run is recorded. Select one to load it, or one of its revisions, into Generate.
+Every run is recorded, newest first. Select one to load it, or one of its revisions, into Generate. Click a column header to sort by it; click it again to reverse.
 
 ![History tab](pub_docs/history.png)
 
 ### Projects
 
-One project per name, holding its reference audio, transcription and ABC.
+One project per name, holding its reference audio, transcription and ABC. Click a column header to sort by it; click it again to reverse.
 
 ![Projects tab](pub_docs/projects.png)
 
 ### Inputs
 
-Reference audio files: play them, use one in the current project, or transcribe it again.
+Reference audio files: play them, use one in the current project, or transcribe it again. Click a column header to sort by it.
 
 ![Inputs tab](pub_docs/inputs.png)
 ![Inputs tab playing a reference](pub_docs/inputs-playing.png)
@@ -52,7 +58,7 @@ Reference audio files: play them, use one in the current project, or transcribe 
 
 Every generated song, filtered by folder, text, tag, run name, seed range or revision.
 Rate, tag, rename, continue a run, regenerate, or export as MP3, WAV or FLAC. Each song
-keeps the recipe it was made from.
+keeps the recipe it was made from. MP3 exports also carry the project's keypoints as chapters.
 
 ![Audio Library tab: songs with ratings, and the selected song's waveform, rating and export controls](pub_docs/library.png)
 
@@ -60,6 +66,10 @@ keeps the recipe it was made from.
 
 Go through unreviewed songs one at a time with the keyboard: Space plays and pauses,
 1/2/3 rates good/neutral/bad and moves on.
+C also rates bad, but first asks if the song has played for less than 30 seconds.
+The keypoints pane on the right keeps a project's moments worth checking, such as the
+chorus or a tricky line. Each has an optional name and pre-roll. *Review next keypoint*
+(X) jumps through them in the order you set, and Z goes back one.
 
 ![Review tab](pub_docs/review.png)
 
@@ -73,31 +83,35 @@ The app's own messages and each server's output, merged by time.
 
 | Crate | What |
 |---|---|
-| `crates/audiocpp-core` | config, launcher, API client, scheduler, media, library, playback, `CoreHandle` — no GUI deps |
-| `crates/audiocpp-gui-core` | `AppState` + pure `update()` reducer — no egui |
-| `crates/audiocpp-gui` | egui/eframe view and the `audiocpp-ui` binary |
+| `crates/incremusic-core` | config, launcher, API client, scheduler, media, library, playback, `CoreHandle` — no GUI deps |
+| `crates/incremusic-gui-core` | `AppState` + pure `update()` reducer — no egui |
+| `crates/incremusic-gui` | egui/eframe view and the `incremusic-yue2` binary |
 
 ## Requirements
 
 - Rust 1.88+ (edition 2024)
 - `ffmpeg` and `ffprobe` on `PATH` (or `ffmpeg:` in the config)
 - Linux: ALSA development files (`libasound2-dev`) for audio output. Build without audio
-  with `cargo build -p audiocpp-gui --no-default-features`.
+  with `cargo build -p incremusic-gui --no-default-features`.
 
 ## Run
 
 ```sh
-cp config.example.ron ~/.config/audiocpp-ui/config.ron   # edit paths, ports, devices
-cargo run --release -p audiocpp-gui -- [--config path/to/config.ron]
+cp config.example.ron ~/.config/incremusic-yue2/config.ron   # edit paths, ports, devices
+cargo run --release -p incremusic-gui -- [--config path/to/config.ron]
 ```
 
 ## Test
 
 ```sh
 cargo test --workspace                 # unit, mock-server integration and headless GUI tests
-AUDIOCPP_REQUIRE_FFMPEG=1 cargo test   # fail instead of skip when ffmpeg is missing
+INCREMUSIC_REQUIRE_FFMPEG=1 cargo test   # fail instead of skip when ffmpeg is missing
 # against a real server (generates one short song):
-AUDIOCPP_SERVER_URL=http://127.0.0.1:8080 cargo test -p audiocpp-core --test real_server -- --ignored
+AUDIOCPP_SERVER_URL=http://127.0.0.1:8080 cargo test -p incremusic-core --test real_server -- --ignored
 ```
 
 The HAR captures used to derive `tests/fixtures/` are not committed (`*.har` is ignored).
+
+## License
+
+[MIT](LICENSE)

@@ -1,15 +1,16 @@
 [workspace]
 resolver = "3"
-members = ["crates/audiocpp-core", "crates/audiocpp-gui-core", "crates/audiocpp-gui"]
+members = ["crates/incremusic-core", "crates/incremusic-gui-core", "crates/incremusic-gui"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/incf-ai/IncreMusic-Yue2"
 
 [workspace.dependencies]
-audiocpp-core = { path = "crates/audiocpp-core" }
-audiocpp-gui-core = { path = "crates/audiocpp-gui-core" }
+incremusic-core = { path = "crates/incremusic-core" }
+incremusic-gui-core = { path = "crates/incremusic-gui-core" }
 
 anyhow = "1"
 base64 = "0.23"

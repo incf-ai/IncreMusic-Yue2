@@ -1,0 +1,42 @@
+[package]
+name = "incremusic-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+directories.workspace = true
+futures-util.workspace = true
+id3.workspace = true
+notify.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+ron.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+symphonia.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+trash.workspace = true
+ulid.workspace = true
+which.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tempfile.workspace = true
+pretty_assertions.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
