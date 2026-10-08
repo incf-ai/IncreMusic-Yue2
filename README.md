@@ -1,6 +1,6 @@
 Human generated note:
 
-I made this program with the intent of speeding up the process of making, reviewing, keeping track of, etc. song covers with the yue2 music model and the sheetsage2 transcription model. It supports using multiple GPUs (multiple audio.cpp servers) simultaniously.
+I made this program with the intent of speeding up the process of making, reviewing, keeping track of, etc. song covers with the yue2 music model and the sheetsage2 transcription model. It supports using multiple GPUs (multiple audio.cpp servers) to generate multiple songs simultaneously.
 
 Machine generated below:
 
