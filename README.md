@@ -87,7 +87,7 @@ through them in the order you set.
 | T / R / L | Tag, rename, show lyrics |
 | Ctrl+Z | Undo the last rating or rename (also in other tabs) |
 
-![Review tab](pub_docs/review.png)
+![Review tab: a song's waveform with keypoint markers, and the project's keypoints pane](pub_docs/review.png)
 
 ### Log
 

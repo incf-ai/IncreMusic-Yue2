@@ -1,5 +1,4 @@
 /target
 *.har
 *.mp3
-/config.local.ron
-start.sh
+*.ignore
